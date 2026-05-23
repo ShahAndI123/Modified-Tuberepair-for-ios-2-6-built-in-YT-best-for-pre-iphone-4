@@ -11,6 +11,7 @@ Note:
 - due to limitations on invidious, views for featured, most viewed, and related wont show. publishing date also wont show for featued and most viewed
 - no login system cuz idk how. sorry. too complicated
 - channel vids wont load cuz youtube keeps getting the handle or name instead of the channel ID due to a youtube handle update
+- vids will load slow since it has to download and convert before playing which takes time, and the built-in yt unfortunately doesn't support direct streaming
 
 Steps to install local invidious: https://docs.invidious.io/installation/ 
 - Use linux because windows may not be stable
