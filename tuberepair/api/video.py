@@ -233,7 +233,14 @@ def get_playlist_from_invidious(playlist_id):
     url = f"{config.URL}/api/v1/playlists/{playlist_id}"
 
     try:
-        r = requests.get(url, timeout=10)
+        r = requests.get(url, timeout=10, headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json"
+        })
+
+        print("PLAYLIST URL:", url)
+        print("STATUS:", r.status_code)
+        print("TEXT:", r.text[:500])
 
         if not r.text.strip():
             raise Exception("Invidious returned blank playlist")
