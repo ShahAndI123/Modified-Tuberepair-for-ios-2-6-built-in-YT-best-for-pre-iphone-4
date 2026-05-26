@@ -1,7 +1,7 @@
 INSTALL:
-yt-dlp
-ffmpeg
-python (id try python 3.11)
+- yt-dlp
+- ffmpeg
+- python (id try python 3.11)
 
 Although a public working invidious was used, you can create your own local invidious (recommended in case they're down)
 - Steps to install local invidious: https://docs.invidious.io/installation/ 
