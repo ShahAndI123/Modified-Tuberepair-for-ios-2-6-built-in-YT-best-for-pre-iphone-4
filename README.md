@@ -11,8 +11,7 @@ The setup is through a local server, but it's the same as how you would set up t
 
 Note:
 - due to limitations on invidious, views for featured, most viewed, and related wont show. publishing date also wont show for featued and most viewed
-- no login system cuz idk how. sorry. too complicated
-- channel vids wont load cuz youtube keeps getting the handle or name instead of the channel ID due to a youtube handle update
+- no login/channel systems for now cuz they take time to complete but will be added, once more poeple support this
 - vids will take time to load, depending on video length, since it has to download and convert before playing which takes time, and the built-in yt unfortunately doesn't support direct streaming
 
 You can send a pull request if you have one or you can provide feedback in https://docs.google.com/forms/d/e/1FAIpQLSf9kGghct4cjndq19QUXI64ODxCYKXFkJ_uBOkVjeek3FFRvQ/viewform?usp=publish-editor
