@@ -6,6 +6,7 @@ from modules import yt
 import os
 import time
 import threading
+import xml.etree.ElementTree as ET
 
 video = Blueprint("video", __name__)
 
@@ -213,6 +214,7 @@ def normalize_video(vid):
             vid.get("authorId")
             or vid.get("uploader_id")
             or vid.get("channel_id")
+            or get_channel_id_from_name(vid.get("author") or vid.get("uploader") or vid.get("channel"))
             or "unknown"
         ),
         "viewCount": safe_int(
@@ -228,6 +230,77 @@ def normalize_video(vid):
     }
 
     print("RELATED VIDEO KEYS:", vid.keys())
+
+@video.route("/feeds/api/users/<path:channel>")
+@video.route("/feeds/api/users/<path:channel>/")
+@video.route("/feeds/api/users/<path:channel>/uploads")
+@video.route("/feeds/api/users/<path:channel>/favorites")
+@video.route("/feeds/api/users/<path:channel>/playlists")
+@video.route("/feeds/api/users/<path:channel>/subscriptions")
+def channel_uploads(channel):
+    print("CHANNEL ROUTE HIT:", channel, flush=True)
+
+    try:
+        if not channel.startswith("UC"):
+            print("RESOLVING NON-UC CHANNEL:", channel, flush=True)
+
+            resolved = get_channel_id_from_name(channel)
+
+            print("RESOLVED CHANNEL:", resolved, flush=True)
+
+            if resolved and resolved != "unknown":
+                channel = resolved
+        rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel}"
+
+        r = requests.get(
+            rss_url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10
+        )
+
+        print("RSS URL:", rss_url, flush=True)
+        print("RSS STATUS:", r.status_code, flush=True)
+        print("RSS START:", r.text[:300], flush=True)
+        
+        if not r.text.strip().startswith("<?xml") and "<feed" not in r.text[:500]:
+            print("RSS DID NOT RETURN XML:", r.text[:300], flush=True)
+            return get.error()
+
+        root = ET.fromstring(r.text)
+
+        print("CHANNEL PARAM:", channel, flush=True)
+
+        ns = {
+            "atom": "http://www.w3.org/2005/Atom",
+            "yt": "http://www.youtube.com/xml/schemas/2015"
+        }
+
+        videos = []
+
+        for entry in root.findall("atom:entry", ns):
+            videos.append({
+                "title": html.escape(entry.findtext("atom:title", "", ns)),
+                "videoId": entry.findtext("yt:videoId", "", ns),
+                "author": html.escape(entry.findtext("atom:author/atom:name", "Unknown", ns)),
+                "authorId": channel,
+                "viewCount": 0,
+                "lengthSeconds": 0,
+                "published": safe_published(entry.findtext("atom:published", "", ns)),
+                "description": ""
+            })
+
+        print("UPLOAD COUNT:", len(videos), flush=True)
+
+        return get.template("uploads.jinja2", {
+            "data": videos,
+            "unix": get.unix,
+            "url": request.url_root.rstrip("/"),
+            "continuation": None
+        })
+
+    except Exception as e:
+        print("CHANNEL UPLOADS ERROR:", e, flush=True)
+        return get.error()
 
 def get_playlist_from_invidious(playlist_id):
     url = f"{config.URL}/api/v1/playlists/{playlist_id}"
@@ -336,6 +409,7 @@ def get_featured_from_hourly_playlists():
                 vid.get("authorId")
                 or vid.get("uploader_id")
                 or vid.get("channel_id")
+                or get_channel_id_from_name(vid.get("author") or vid.get("uploader") or vid.get("channel"))
                 or "unknown"
             ),
             "viewCount": int(vid.get("viewCount") or vid.get("view_count") or 0),
@@ -343,6 +417,21 @@ def get_featured_from_hourly_playlists():
             "published": int(vid.get("published") or vid.get("timestamp") or 0),
             "description": html.escape((vid.get("description") or "")[:120])
         }
+
+        item["authorId"] = (
+            item.get("authorId")
+            if item.get("authorId") not in ["unknown", "Unknown", "", None]
+            else get_channel_id_from_name(item.get("author"))
+        )
+
+        print(
+            "UPLOADER DEBUG:",
+            item.get("author"),
+            item.get("authorId"),
+            flush=True
+        )
+
+        print("UPLOADER ID:", item["author"], item["authorId"], flush=True)
 
         item = apply_cached_metadata(item)
         data.append(item)
@@ -353,6 +442,63 @@ def get_featured_from_hourly_playlists():
 
     random.shuffle(data)
     return data
+
+channel_id_cache = {}
+
+def get_channel_id_from_name(name):
+
+    if not name:
+        return "unknown"
+
+    if name in channel_id_cache:
+        return channel_id_cache[name]
+
+    try:
+        r = requests.get(
+            f"{config.URL}/api/v1/search",
+            params={
+                "q": name,
+                "type": "channel"
+            },
+            timeout=10
+        )
+
+        data = r.json()
+
+        if isinstance(data, list):
+
+            for item in data:
+
+                author = (
+                    item.get("author")
+                    or ""
+                ).lower().strip()
+
+                if author == name.lower().strip():
+
+                    cid = item.get("authorId")
+
+                    if cid:
+                        channel_id_cache[name] = cid
+                        return cid
+
+            # fallback first result
+            if data:
+                cid = data[0].get("authorId")
+
+                if cid:
+                    channel_id_cache[name] = cid
+                    return cid
+
+    except Exception as e:
+        print("CHANNEL ID SEARCH ERROR:", e)
+
+    return "unknown"
+
+print(
+    "TEST CHANNEL ID:",
+    get_channel_id_from_name("MrBeast")
+)
 
 # featured videos
 # 2 alternate routes for popular page and search results
@@ -529,12 +675,27 @@ def most_viewed(res=''):
                     "title": html.escape(vid.get("title") or "Untitled"),
                     "videoId": vid.get("id"),
                     "author": html.escape(vid.get("uploader") or "Unknown"),
-                    "authorId": vid.get("channel_id") or vid.get("uploader_id") or "unknown",
+                    "authorId": vid.get("channel_id") or vid.get("uploader_id") or get_channel_id_from_name(vid.get("author") or vid.get("uploader") or vid.get("channel")) or "unknown",
                     "viewCount": int(vid.get("view_count") or 0),
                     "lengthSeconds": int(vid.get("duration") or 0),
                     "published": int(vid.get("timestamp") or 0),
                     "description": html.escape((vid.get("description") or "")[:120])
                 }
+
+                print("UPLOADER ID:", item["author"], item["authorId"], flush=True)
+
+                item["authorId"] = (
+                    item.get("authorId")
+                    if item.get("authorId") not in ["unknown", "Unknown", "", None]
+                    else get_channel_id_from_name(item.get("author"))
+                )
+
+                print(
+                    "UPLOADER DEBUG:",
+                    item.get("author"),
+                    item.get("authorId"),
+                    flush=True
+                )
 
                 item = apply_cached_metadata(item)
                 data.append(item)
@@ -729,13 +890,40 @@ def search_videos(res=''):
                 "title": html.escape(str(title)),
                 "videoId": vid_id,
                 "author": html.escape(str(author)),
-                "authorId": vid.get("authorId") or vid.get("uploader_id") or vid.get("channel_id") or "unknown",
+                "authorId": vid.get("authorId") or vid.get("uploader_id") or vid.get("channel_id") or get_channel_id_from_name(vid.get("author") or vid.get("uploader") or vid.get("channel")) or  "unknown",
                 "viewCount": int(view_count or 0),
                 "lengthSeconds": int(duration or 0),
                 "published": int(published or 0),
                 "publishedText": vid.get("publishedText") or "",
                 "description": html.escape(str(vid.get("description") or ""))
             }
+
+            print(
+                "AUTHOR:", item["author"],
+                "AUTHORID:", item["authorId"],
+                flush=True
+            )
+
+            print("UPLOADER ID:", item["author"], item["authorId"], flush=True)
+
+            print(
+                "TITLE:", item["title"],
+                "DESC:", repr(item["description"][:100]),
+                flush=True
+            )
+
+            item["authorId"] = (
+                item.get("authorId")
+                if item.get("authorId") not in ["unknown", "Unknown", "", None]
+                else get_channel_id_from_name(item.get("author"))
+            )
+
+            print(
+                "UPLOADER DEBUG:",
+                item.get("author"),
+                item.get("authorId"),
+                flush=True
+            )
 
             #item = apply_cached_metadata(item)
             data.append(item)
@@ -1014,7 +1202,7 @@ def get_suggested(video_id, res=''):
                 "title": html.escape(str(vid_title)),
                 "videoId": vid_id,
                 "author": html.escape(str(vid.get("author") or "Unknown")),
-                "authorId": vid.get("authorId") or "unknown",
+                "authorId": vid.get("authorId") or get_channel_id_from_name(vid.get("author") or vid.get("uploader") or vid.get("channel")) or "unknown",
                 "viewCount": safe_int(vid.get("viewCount") or 0),
                 "lengthSeconds": safe_int(vid.get("lengthSeconds") or 0),
                 "published": safe_published(vid.get("published") or 0),

@@ -2,6 +2,9 @@ from modules import get, helpers, yt
 from flask import Blueprint, Flask, request, redirect, render_template
 import config
 from modules.logs import print_with_seperator
+import requests
+import html
+import xml.etree.ElementTree as ET
 
 channel = Blueprint("channel", __name__)
 
@@ -75,30 +78,62 @@ def channels(res=''):
 @channel.route("/feeds/api/users/<channel_id>/uploads")
 @channel.route("/<int:res>/feeds/api/users/<channel_id>/uploads")
 def uploads(channel_id, res=''):
+    print("UPLOADS ROUTE USED:", channel_id, flush=True)
+
     if not channel_id:
         return get.error()
-    # Clamp Res
+
     if type(res) == int:
         res = min(max(res, 144), config.RESMAX)
-    
-    url = request.url_root + str(res) 
-    continuation_token = request.args.get('continuation') and '&amp;continuation=' + request.args.get('continuation') or ''
-    # https://docs.invidious.io/api/channels_endpoint/#get-apiv1channelsidvideos
-    # Despite documention says /latest takes in a continuation token, it doesn't
-    # sort_by is broken according to documention and will default to newest
-    # we will add it anyway incase it ever gets fixed
-    data = get.fetch(f"{config.URL}/api/v1/channels/{channel_id}/videos?sort_by=newest{continuation_token}")
-    # Templates have the / at the end, so let's remove it.
-    
+
+    url = request.url_root + str(res)
+
     if url[-1] == '/':
         url = url[:-1]
 
-    if data:
-        return get.template('uploads.jinja2',{
-            'data': data.get('videos', []),
+    try:
+        rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+
+        r = requests.get(
+            rss_url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10
+        )
+
+        print("RSS URL:", rss_url, flush=True)
+        print("RSS STATUS:", r.status_code, flush=True)
+        print("RSS START:", r.text[:200], flush=True)
+
+        root = ET.fromstring(r.text)
+
+        ns = {
+            "atom": "http://www.w3.org/2005/Atom",
+            "yt": "http://www.youtube.com/xml/schemas/2015"
+        }
+
+        videos = []
+
+        for entry in root.findall("atom:entry", ns):
+            videos.append({
+                "title": html.escape(entry.findtext("atom:title", "", ns)),
+                "videoId": entry.findtext("yt:videoId", "", ns),
+                "author": html.escape(entry.findtext("atom:author/atom:name", "Unknown", ns)),
+                "authorId": channel_id,
+                "viewCount": 0,
+                "lengthSeconds": 0,
+                "published": 0,
+                "description": ""
+            })
+
+        print("RSS UPLOAD COUNT:", len(videos), flush=True)
+
+        return get.template('uploads.jinja2', {
+            'data': videos,
             'unix': get.unix,
-            'continuation': 'continuation' in data and data['continuation'] or None,
+            'continuation': None,
             'url': url
         })
-    
-    return get.error()
+
+    except Exception as e:
+        print("CHANNEL RSS ERROR:", e, flush=True)
+        return get.error()
