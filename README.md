@@ -10,8 +10,11 @@ Although a public working invidious was used, you can create your own local invi
 The setup is through a local server, but it's the same as how you would set up tuberepair https://github.com/kevinf100/tuberepair.uptimetrackers.com. Instead of https://tuberepair.uptimetrackers.com/, use http://YOUR_LOCAL_IP:4000 in the tuberepair tweak.
 
 Note:
-- due to limitations on invidious, views for featured, most viewed, and related wont show. publishing date also wont show for featued and most viewed
-- no login/channel systems for now cuz they take time to complete but will be added, once more poeple support this
+- due to limitations on invidious, views for featured, most viewed, and related wont show. Publishing date also wont show for featued and most viewed
+- no login systems for now cuz they take time to complete but will be added, once more poeple support this
+- There is no real video description because you can't directly get the description from invidious. Even if I did add, it makes it slow to load videos on the front page because they are separate. But it's not crazy slow (takes 20 seconds to load), but if people really want it, I guess I can add it.
+- the channel names are all just channel IDs (just like Lincoln's tuberepair) because of an XML change that's required for channel uplaods to work
+  - To compromise for it, it'll be added in the description (ex. Author name - Title of video)
 - vids will take time to load, depending on video length, since it has to download and convert before playing which takes time, and the built-in yt unfortunately doesn't support direct streaming
 
 You can send a pull request if you have one or you can provide feedback in https://docs.google.com/forms/d/e/1FAIpQLSf9kGghct4cjndq19QUXI64ODxCYKXFkJ_uBOkVjeek3FFRvQ/viewform?usp=publish-editor
