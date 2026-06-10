@@ -11,10 +11,13 @@ The setup is through a local server, but it's the same as how you would set up t
 
 Note:
 - due to limitations on invidious, views for featured, most viewed, and related wont show. Publishing date also wont show for featued and most viewed
-- no login systems for now cuz they take time to complete but will be added, once more poeple support this
-- There is no real video description because you can't directly get the description from invidious. Even if I did add, it makes it slow to load videos on the front page because they are separate. But it's not crazy slow (takes 20 seconds to load), but if people really want it, I guess I can add it.
+- no login systems for now cuz they take time to complete but will be added, once more people support this
+- There is no real video description because you can't directly get the description from Invidious. Even if I did add, it makes it slow to load videos on the front page because they are separate. But it's not crazy slow (takes 20 seconds to load), but if people really want it, I guess I can add it.
 - the channel names are all just channel IDs (just like Lincoln's tuberepair) because of an XML change that's required for channel uplaods to work
   - To compromise for it, it'll be added in the description (ex. Author name - Title of video)
 - vids will take time to load, depending on video length, since it has to download and convert before playing which takes time, and the built-in yt unfortunately doesn't support direct streaming
+- Featured videos may sometimes not work because the playlists used for featured videos sometimes won't display for some reason
+- The video load time will depend on your CPU and internet speed. Avoid playing 24 hour or 100 hour videos because that will take very very very long to load and may take up storage. 
+- Youtube may be very slow if you have many videos downloading in the backend. If that happens, restart the server using Ctrl + C or restart your computer if your computer becomes slow. Also, remove any other videos in your static folder if they take up a lot of storage in the background or wait 10 minutes for them to be removed.
 
-You can send a pull request if you have one or you can provide feedback in https://docs.google.com/forms/d/e/1FAIpQLSf9kGghct4cjndq19QUXI64ODxCYKXFkJ_uBOkVjeek3FFRvQ/viewform?usp=publish-editor
+You can send a pull request if you have one or you can provide feedback in https://docs.google.com/forms/d/e/1FAIpQLSf9kGghct4cjndq19QUXI64ODxCYKXFkJ_uBOkVjeek3FFRvQ/viewform?usp=publish-editor or in the issues tab
