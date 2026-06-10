@@ -242,60 +242,67 @@ def channel_uploads(channel):
 
     try:
         if not channel.startswith("UC"):
-            print("RESOLVING NON-UC CHANNEL:", channel, flush=True)
-
             resolved = get_channel_id_from_name(channel)
-
-            print("RESOLVED CHANNEL:", resolved, flush=True)
 
             if resolved and resolved != "unknown":
                 channel = resolved
-        rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel}"
+            else:
+                return get.error()
 
-        r = requests.get(
-            rss_url,
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=10
+        data = get.fetch(
+            f"{config.URL}/api/v1/channels/{channel}/videos?sort_by=newest"
         )
 
-        print("RSS URL:", rss_url, flush=True)
-        print("RSS STATUS:", r.status_code, flush=True)
-        print("RSS START:", r.text[:300], flush=True)
-        
-        if not r.text.strip().startswith("<?xml") and "<feed" not in r.text[:500]:
-            print("RSS DID NOT RETURN XML:", r.text[:300], flush=True)
+        if not data:
             return get.error()
 
-        root = ET.fromstring(r.text)
+        videos = data.get("videos", [])
 
-        print("CHANNEL PARAM:", channel, flush=True)
+        clean = []
 
-        ns = {
-            "atom": "http://www.w3.org/2005/Atom",
-            "yt": "http://www.youtube.com/xml/schemas/2015"
-        }
+        for vid in videos:
+            if vid.get("type") == "parse-error":
+                continue
 
-        videos = []
+            item = normalize_video(vid)
 
-        for entry in root.findall("atom:entry", ns):
-            videos.append({
-                "title": html.escape(entry.findtext("atom:title", "", ns)),
-                "videoId": entry.findtext("yt:videoId", "", ns),
-                "author": html.escape(entry.findtext("atom:author/atom:name", "Unknown", ns)),
-                "authorId": channel,
-                "viewCount": 0,
-                "lengthSeconds": 0,
-                "published": safe_published(entry.findtext("atom:published", "", ns)),
-                "description": ""
-            })
+            print(
+                "UPLOAD ITEM:",
+                item["title"],
+                item["viewCount"],
+                item["lengthSeconds"],
+                item["published"],
+                flush=True
+            )
 
-        print("UPLOAD COUNT:", len(videos), flush=True)
+            if item:
+                item["viewCount"] = safe_int(
+                    vid.get("viewCount")
+                    or vid.get("view_count")
+                    or vid.get("views")
+                    or item.get("viewCount")
+                )
+
+                item["lengthSeconds"] = safe_int(
+                    vid.get("lengthSeconds")
+                    or vid.get("length_seconds")
+                    or vid.get("duration")
+                    or item.get("lengthSeconds")
+                )
+
+                item["published"] = safe_published(
+                    vid.get("published")
+                    or vid.get("publishedText")
+                    or vid.get("timestamp")
+                    or item.get("published")
+                )
+                clean.append(item)
 
         return get.template("uploads.jinja2", {
-            "data": videos,
+            "data": clean,
             "unix": get.unix,
             "url": request.url_root.rstrip("/"),
-            "continuation": None
+            "continuation": data.get("continuation"),
         })
 
     except Exception as e:

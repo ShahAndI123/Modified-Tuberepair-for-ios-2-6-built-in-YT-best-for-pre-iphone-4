@@ -2,7 +2,6 @@
 <feed xmlns="http://www.w3.org/2005/Atom" xmlns:gd="http://schemas.google.com/g/2005" xmlns:openSearch="http://a9.com/-/spec/opensearch/1.1/" xmlns:yt="http://gdata.youtube.com/schemas/2007" xmlns:media="http://search.yahoo.com/mrss/" gd:etag="">
   <id>{{ url }}/feeds/api/standardfeeds/US/recently_featured</id>
   <category scheme="http://schemas.google.com/g/2005#kind" term="{{ url }}/schemas/2007/#video" />
-<title>UPLOADS TEST</title>
 <title>Spotlight Videos</title>  <logo>http://www.gstatic.com/youtube/img/logo.png</logo>
   <link rel="http://schemas.google.com/g/2005#feed" type="application/atom+xml" href="{{url}}/feeds/api/standardfeeds/US/recently_featured" />
   <link rel="http://schemas.google.com/g/2005#batch" type="application/atom+xml" href="{{url}}/feeds/api/standardfeeds/US/recently_featured/batch" />
@@ -60,10 +59,10 @@
   <yt:hd />
       <media:group>
         <media:category label="Music" scheme="http://gdata.youtube.com/schemas/2007/categories.cat">Music</media:category>
-        <media:content url="{{ url }}/getvideo/{{ uploads['videoId'] }}" type="video/mp4" medium="video" isDefault="true" expression="full" duration="0" yt:format="3" />
-        <media:content url="{{ url }}/{{ uploads['videoId'] }}.3gpp" type="video/3gpp" medium="video" expression="full" duration="0" yt:format="2" />
-        <media:content url="{{ url }}/getvideo/{{ uploads['videoId'] }}" type="video/mp4" medium="video" expression="full" duration="0" yt:format="8" />
-        <media:content url="{{ url }}/{{ uploads['videoId'] }}.3gpp" type="video/3gpp" medium="video" expression="full" duration="0" yt:format="9" />
+        <media:content url="{{ url }}/getvideo/{{ uploads['videoId'] }}" type="video/mp4" medium="video" isDefault="true" expression="full" duration="{{ uploads['lengthSeconds'] }}" yt:format="3" />
+        <media:content url="{{ url }}/{{ uploads['videoId'] }}.3gpp" type="video/3gpp" medium="video" expression="full" duration="{{ uploads['lengthSeconds'] }}" yt:format="2" />
+        <media:content url="{{ url }}/getvideo/{{ uploads['videoId'] }}" type="video/mp4" medium="video" expression="full" duration="{{ uploads['lengthSeconds'] }}" yt:format="8" />
+        <media:content url="{{ url }}/{{ uploads['videoId'] }}.3gpp" type="video/3gpp" medium="video" expression="full" duration="{{ uploads['lengthSeconds'] }}" yt:format="9" />
         <media:credit role="uploader" scheme="urn:youtube" yt:display="{{ uploads['author'] }}">{{ uploads['authorId'] }}</media:credit>
         <media:description type="plain">By {{uploads['author']}} - {{uploads['title']}}</media:description>
         <media:keywords>keywords</media:keywords>
