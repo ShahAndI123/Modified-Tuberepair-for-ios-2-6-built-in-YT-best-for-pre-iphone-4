@@ -16,7 +16,7 @@ Note:
 - the channel names are all just channel IDs (just like Lincoln's tuberepair) because of an XML change that's required for channel uplaods to work
   - To compromise for it, it'll be added in the description (ex. Author name - Title of video)
 - vids will take time to load, depending on video length, since it has to download and convert before playing which takes time, and the built-in yt unfortunately doesn't support direct streaming
-- Featured videos may sometimes not work because the playlists used for featured videos sometimes won't display for some reason
+- the primary playlists featured videos uses sometimes does not work which is why I added my own playlist as fallback that shows common recommendations, searches, and topics picked
 - The video load time will depend on your CPU and internet speed. Avoid playing 24 hour or 100 hour videos because that will take very very very long to load and may take up storage. 
 - Youtube may be very slow if you have many videos downloading in the backend. If that happens, restart the server using Ctrl + C or restart your computer if your computer becomes slow. Also, remove any other videos in your static folder if they take up a lot of storage in the background or wait 10 minutes for them to be removed.
 
