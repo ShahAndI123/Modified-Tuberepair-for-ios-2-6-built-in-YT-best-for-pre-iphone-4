@@ -356,29 +356,12 @@ def get_featured_from_hourly_playlists():
     entries = get_playlist_from_invidious(playlist_id)
 
     if not entries:
-        print("INVIDIOUS FAILED, FALLING BACK TO YT-DLP")
+        print("INVIDIOUS FAILED, FALLING BACK TO FALLBACK PLAYLIST")
 
-        result = subprocess.run(
-            [
-                "yt-dlp",
-                "--dump-json",
-                "--ignore-errors",
-                "--no-warnings",
-                "--playlist-end", "30",
-                playlist_url
-            ],
-            capture_output=True,
-            text=True
-        )
+        fallback_playlist_url = "https://www.youtube.com/playlist?list=PLMdDlbZ4P5Kl63ywRrbyVljrU4pA8YQ8Z"
+        fallback_playlist_id = fallback_playlist_url.split("list=")[-1].split("&")[0]
 
-        entries = []
-
-        for line in result.stdout.splitlines():
-            try:
-                vid = json.loads(line)
-                entries.append(vid)
-            except Exception as e:
-                print("VIDEO LINE PARSE ERROR:", e)
+        entries = get_playlist_from_invidious(fallback_playlist_id)
 
     random.shuffle(entries)
 
