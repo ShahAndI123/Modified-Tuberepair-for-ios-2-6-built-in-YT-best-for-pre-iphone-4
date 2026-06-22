@@ -9,7 +9,7 @@ Although a public working invidious was used, you can create your own local invi
 
 The setup is through a local server, but it's the same as how you would set up tuberepair https://github.com/kevinf100/tuberepair.uptimetrackers.com. Instead of https://tuberepair.uptimetrackers.com/, use http://YOUR_LOCAL_IP:4000 in the tuberepair tweak.
 
-Still confused on how to set it up, here's a video https://youtu.be/M25eJ0s6X18
+Still confused on how to set it up? Here's a tutorial https://youtu.be/M25eJ0s6X18
 
 Note:
 - due to limitations on invidious, views for featured, most viewed, and related wont show. Publishing date also wont show for featued and most viewed
