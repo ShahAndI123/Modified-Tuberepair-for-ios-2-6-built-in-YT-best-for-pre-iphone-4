@@ -1,3 +1,5 @@
+* WILL NOT WORK FOR NOW, UNLESS YOU USE A LOCAL INVIDIOUS BECAUSE PUBLIC INSTANCE NOW REQUIRES BOT VERIFY WHICH WONT WORK FOR TUBEREPAIR. WILL BE FIXED SHORTLY*
+
 INSTALL:
 - yt-dlp
 - ffmpeg
@@ -18,8 +20,7 @@ Note:
 - the channel names are all just channel IDs (just like Lincoln's tuberepair) because of an XML change that's required for channel uplaods to work
   - To compromise for it, it'll be added in the description (ex. Author name - Title of video)
 - vids will take time to load, depending on video length, since it has to download and convert before playing which takes time, and the built-in yt unfortunately doesn't support direct streaming
-- the primary playlists featured videos uses has been fixed but hasnt been pushed to the instance yet. I will still have my own playlist as fallback that shows common recommendations, searches, and topics picked
-   - you can load them by using a local instance (with latest version) or any alternative public instance that properly loads playlists 
+- most viewed won't work because of invidious bug. Wait until that gets fixed ig
 - The video load time will depend on your CPU and internet speed. Avoid playing 24 hour or 100 hour videos because that will take very very very long to load and may take up storage. 
 - Youtube may be very slow if you have many videos downloading in the backend. If that happens, restart the server using Ctrl + C or restart your computer if your computer becomes slow. Also, remove any other videos in your static folder if they take up a lot of storage in the background or wait 10 minutes for them to be removed.
 
