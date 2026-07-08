@@ -1,0 +1,9 @@
+Flask
+Flask-CacheControl
+Flask-Compress
+Jinja2
+requests-cache
+requests
+waitress
+requests[socks]
+redis
