@@ -14,6 +14,8 @@ The setup is through a local server, but it's the same as how you would set up t
 Still confused on how to set it up? Here's a tutorial https://youtu.be/M25eJ0s6X18
 
 Note:
+- this is NOT a replacement for tuberepair.uptimetrackers.com. It is again a self-hosted instance that fixed the playback error for iOS 3 devices especially and to fix the search function for accurate results + more coming up
+  - ie. if you're using ios 4.2.1 on iphone 3g or ipod Touch 2G and outside without a public instance, use http://tuberepair.uptimetrackers.com
 - due to limitations on invidious, views for featured, most viewed, and related wont show. Publishing date also wont show for featued and most viewed
 - no login systems for now cuz they take time to complete but will be added, once more people support this
 - There is no real video description because you can't directly get the description from Invidious. Even if I did add, it makes it slow to load videos on the front page because they are separate. But it's not crazy slow (takes 20 seconds to load), but if people really want it, I guess I can add it.
