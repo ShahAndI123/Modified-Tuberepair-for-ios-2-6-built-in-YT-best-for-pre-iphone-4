@@ -68,7 +68,7 @@ else:
 if "URL" in OSEnv:
     URL = OSEnv["URL"]
 else:
-    URL = "https://inv.thepixora.com"
+    URL = "https://inv2.truehosting.net"
 
 # Max res to allow users
 # Mainly to stop converting long numbers to strings.
