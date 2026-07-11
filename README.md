@@ -1,5 +1,3 @@
-* WILL NOT WORK FOR NOW, UNLESS YOU USE A LOCAL INVIDIOUS BECAUSE PUBLIC INSTANCE NOW REQUIRES BOT VERIFY WHICH WONT WORK FOR TUBEREPAIR. WILL BE FIXED SHORTLY*
-
 INSTALL:
 - yt-dlp
 - ffmpeg
@@ -14,6 +12,8 @@ The setup is through a local server, but it's the same as how you would set up t
 Still confused on how to set it up? Here's a tutorial https://youtu.be/M25eJ0s6X18
 
 Note:
+- be aware of any invidious sites not working anymore. If that happens, either find another working public invidious instance or use a local instance
+  - And let me know if invidious site is down and you have another fully working instance I can update to my code
 - this is NOT a replacement for tuberepair.uptimetrackers.com. It is again a self-hosted instance that fixed the playback error for iOS 3 devices especially and to fix the search function for accurate results + more coming up
   - ie. if you're using ios 4.2.1 on iphone 3g or ipod Touch 2G and outside without a public instance, use http://tuberepair.uptimetrackers.com
   - direct streaming does work for ios 4.2.1, so uptimetrackers url will load videos 
