@@ -585,7 +585,7 @@ def frontpage(regioncode="US", popular=None, res=''):
         return get.error()
 
 def get_most_viewed_from_playlist():
-    playlist_id = "PLNc3mV34rpBmy7pp1sXOR75hQ-PewFsfJ"
+    playlist_id = "PLD8WkaWYGIio"
     playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
 
     data = get_playlist_from_invidious(playlist_id)
@@ -866,9 +866,7 @@ def search_videos(res=''):
             if vid.get("liveNow") or vid.get("isLive"):
                 continue
 
-            if "shorts" in title.lower():
-                continue
-
+            
             print("ADDING:", title, vid_id, duration)
 
             published = vid.get("published") or vid.get("timestamp") or 0
