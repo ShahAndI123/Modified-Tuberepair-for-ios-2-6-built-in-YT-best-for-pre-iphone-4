@@ -2,6 +2,8 @@ from flask import Blueprint, request, redirect, send_file, render_template, Resp
 import config
 from modules import get, helpers
 from jinja2 import Environment, FileSystemLoader
+from api.login import extract_device_id, get_valid_access_token, get_logged_in_channel_id
+from api.video import normalize_video
 
 playlist = Blueprint("playlist", __name__)
 
@@ -17,9 +19,27 @@ def playlists(channel_id, res=''):
     # Clamp Res
     if type(res) == int:
         res = min(max(res, 144), config.RESMAX)
-    
-    url = request.url_root + str(res) 
+
+    url = request.url_root + str(res)
     continuationToken = request.args.get('continuation') and '?continuation=' + request.args.get('continuation') or ''
+
+    if channel_id == "default":
+        device_id = extract_device_id(request)
+        access_token = get_valid_access_token(device_id)
+        resolved = get_logged_in_channel_id(access_token) if access_token else None
+        print("PLAYLISTS default-channel resolution:", resolved, flush=True)
+        if resolved:
+            channel_id = resolved
+        else:
+            if url[-1] == '/':
+                url = url[:-1]
+            return get.template('channel_playlists.jinja2', {
+                'data': [],
+                'continuation': None,
+                'url': url,
+                'channel_id': channel_id
+            })
+
     try:
         data = get.fetch(f"{config.URL}/api/v1/channels/{channel_id}/playlists{continuationToken}")
 
@@ -35,7 +55,8 @@ def playlists(channel_id, res=''):
                 'channel_id': channel_id
             })
         raise Exception("No Data was returned!")
-    except:
+    except Exception as e:
+        print("PLAYLISTS ERROR:", e, flush=True)
         return get.error()
 
 
@@ -75,8 +96,14 @@ def playlists_video(playlist_id, res=''):
         next_page = None
 
     if data:
+        clean = []
+        for vid in data['videos']:
+            item = normalize_video(vid)
+            if item:
+                clean.append(item)
+
         return get.template('playlist_videos.jinja2',{
-            'data': data['videos'],
+            'data': clean,
             'unix': get.unix,
             'url': url,
             'next_page': next_page

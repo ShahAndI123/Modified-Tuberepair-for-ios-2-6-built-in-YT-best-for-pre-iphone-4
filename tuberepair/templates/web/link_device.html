@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Link YouTube Account</title></head>
+<body>
+  <h1>Link Your Google Account</h1>
+  <p>Device ID: <code>{{ device_id }}</code></p>
+
+  <p>Pick a username/password for the classic YouTube app (this stays local — it's not your Google password):</p>
+  <input id="username" placeholder="username">
+  <input id="password" placeholder="password" type="password">
+  <button onclick="autoGenerate()">Auto-generate instead</button>
+
+  <button onclick="startLink()">Start Device Authorization</button>
+
+  <div id="step2" style="display:none">
+    <p>Go to <a id="verifyUrl" target="_blank"></a> on your phone or computer and enter this code:</p>
+    <h2 id="userCode"></h2>
+    <p id="status">Waiting for you to approve…</p>
+  </div>
+
+  <script>
+    const deviceId = "{{ device_id }}";
+    let pollTimer;
+
+    function autoGenerate() {
+      document.getElementById('username').value = 'user' + Math.floor(Math.random()*100000);
+      document.getElementById('password').value = Math.random().toString(36).slice(-10);
+    }
+
+    async function startLink() {
+      const res = await fetch('/o/oauth2/start_device_flow', { method: 'POST' });
+      const data = await res.json();
+      document.getElementById('step2').style.display = 'block';
+      document.getElementById('verifyUrl').href = data.verification_url;
+      document.getElementById('verifyUrl').innerText = data.verification_url;
+      document.getElementById('userCode').innerText = data.user_code;
+
+      pollTimer = setInterval(() => poll(data.device_code), (data.interval || 5) * 1000);
+    }
+
+    async function poll(deviceCode) {
+      const res = await fetch('/o/oauth2/poll_device_flow', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ device_code: deviceCode })
+      });
+      const data = await res.json();
+      if (data.status === 'linked') {
+        clearInterval(pollTimer);
+        document.getElementById('status').innerText = 'Linked! Saving…';
+        await fetch('/link_device_token', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            device_id: deviceId,
+            username: document.getElementById('username').value,
+            password: document.getElementById('password').value,
+            access_token: data.tokens.access_token,
+            refresh_token: data.tokens.refresh_token
+          })
+        });
+        document.getElementById('status').innerText = 'Done! Go back to the app and sign in with your local username/password.';
+      } else if (data.status === 'error') {
+        clearInterval(pollTimer);
+        document.getElementById('status').innerText = 'Error linking account.';
+      }
+    }
+  </script>
+</body>
+</html>

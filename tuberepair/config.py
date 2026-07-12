@@ -111,6 +111,18 @@ if "COMPRESS" in OSEnv:
 else:
     COMPRESS = True
 
+# -- Login (device-code linking) -- #
+
+if "GOOGLE_CLIENT_ID" in OSEnv:
+    GOOGLE_CLIENT_ID = OSEnv["GOOGLE_CLIENT_ID"]
+else:
+    GOOGLE_CLIENT_ID = "REPLACEME"
+
+if "GOOGLE_CLIENT_SECRET" in OSEnv:
+    GOOGLE_CLIENT_SECRET = OSEnv["GOOGLE_CLIENT_SECRET"]
+else:
+    GOOGLE_CLIENT_SECRET = "REPLACEME"
+
 # -- Custom functions -- #
 
 # Number of featured videos (including categories)

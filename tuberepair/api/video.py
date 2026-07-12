@@ -3,15 +3,36 @@ from flask import Blueprint, Flask, request, redirect, render_template, Response
 import config
 from modules.logs import print_with_seperator
 from modules import yt
+from api.login import (
+    extract_device_id,
+    is_device_linked,
+    any_session_linked,
+    get_valid_access_token,
+    get_logged_in_channel_id,
+    fetch_personal_feed,
+)
 import os
 import time
 import threading
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 video = Blueprint("video", __name__)
 
 featured_cache = {}
 featured_cache_time = {}
+
+# prevents multiple simultaneous requests for the same video from spawning
+# duplicate yt-dlp/ffmpeg pipelines in parallel
+_download_locks = {}
+_download_locks_guard = threading.Lock()
+_download_semaphore = threading.Semaphore(2)  # max 2 simultaneous yt-dlp/ffmpeg jobs
+
+def _get_download_lock(video_id):
+    with _download_locks_guard:
+        if video_id not in _download_locks:
+            _download_locks[video_id] = threading.Lock()
+        return _download_locks[video_id]
 
 import subprocess
 import json
@@ -57,6 +78,42 @@ def safe_int(value):
 
     return 0
 
+def enrich_view_counts(items, max_workers=10):
+    """Fetch real stats (views, duration, published date) for items that
+    are missing them, concurrently instead of one-at-a-time — sequential
+    per-item calls on a 20-30 item feed is what caused Top Rated to time
+    out."""
+    to_fetch = [
+        item for item in items
+        if item and (not item.get("viewCount") or not item.get("lengthSeconds"))
+    ]
+    if not to_fetch:
+        return items
+
+    def _fetch(item):
+        try:
+            stats = get.fetch(
+                f"{config.URL}/api/v1/videos/{item['videoId']}"
+                f"?fields=viewCount,lengthSeconds,published"
+            )
+            if stats:
+                if not item.get("viewCount"):
+                    item["viewCount"] = int(stats.get("viewCount") or 0)
+                if not item.get("lengthSeconds"):
+                    item["lengthSeconds"] = int(stats.get("lengthSeconds") or 0)
+                if not item.get("published"):
+                    item["published"] = int(stats.get("published") or 0)
+        except Exception as e:
+            print("STATS ENRICH FAILED:", item.get("videoId"), e, flush=True)
+        return item
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_fetch, item) for item in to_fetch]
+        for future in as_completed(futures):
+            future.result()
+
+    return items
+
 def get_relevant_videos(video_id):
     try:
         r = requests.get(
@@ -70,12 +127,11 @@ def get_relevant_videos(video_id):
             results = []
 
             for vid in data.get("recommendedVideos", []):
-                print("VIEWCOUNT RAW:", repr(vid.get("viewCount")))
-                print("FULL RELATED ITEM:", vid)
                 item = normalize_video(vid)
-
                 if item:
                     results.append(item)
+
+            results = enrich_view_counts(results)
 
             if results:
                 return results[:15]
@@ -186,6 +242,26 @@ def apply_cached_metadata(item):
 
     return item
 
+def build_login_prompt(req):
+    device_id = extract_device_id(req)
+    linked = is_device_linked(device_id) or any_session_linked()
+    print("LOGIN PROMPT CHECK device_id:", device_id, "linked:", linked, flush=True)
+    if linked:
+        return None
+
+    link_url = f"{req.url_root.rstrip('/')}/o/oauth2/programmatic_auth?device_id={device_id or 'unknown'}"
+
+    return {
+        "title": html.escape(f"Login here: {link_url}"),
+        "videoId": "login_prompt",
+        "author": "Server",
+        "authorId": "unknown",
+        "viewCount": 0,
+        "lengthSeconds": 0,
+        "published": int(time.time()),
+        "description": "Go to this URL on any device to create a login and link this one."
+    }
+
 def normalize_video(vid):
     title = vid.get("title") or "Untitled"
     video_id = vid.get("videoId") or vid.get("id")
@@ -231,16 +307,32 @@ def normalize_video(vid):
 
     print("RELATED VIDEO KEYS:", vid.keys())
 
-@video.route("/feeds/api/users/<path:channel>")
-@video.route("/feeds/api/users/<path:channel>/")
-@video.route("/feeds/api/users/<path:channel>/uploads")
-@video.route("/feeds/api/users/<path:channel>/favorites")
-@video.route("/feeds/api/users/<path:channel>/playlists")
-@video.route("/feeds/api/users/<path:channel>/subscriptions")
+@video.route("/feeds/api/users/<channel>")
+@video.route("/feeds/api/users/<channel>/")
+@video.route("/feeds/api/users/<channel>/uploads")
+@video.route("/feeds/api/users/<channel>/playlists")
+@video.route("/feeds/api/users/<channel>/subscriptions")
 def channel_uploads(channel):
     print("CHANNEL ROUTE HIT:", channel, flush=True)
 
     try:
+        if channel == "default":
+            device_id = extract_device_id(request)
+            print("CHANNEL_UPLOADS extracted device_id:", device_id, flush=True)
+            access_token = get_valid_access_token(device_id)
+            print("CHANNEL_UPLOADS access_token present:", bool(access_token), flush=True)
+            resolved_own_channel = get_logged_in_channel_id(access_token) if access_token else None
+            print("CHANNEL_UPLOADS resolved_own_channel:", resolved_own_channel, flush=True)
+            if resolved_own_channel:
+                channel = resolved_own_channel
+            else:
+                return get.template("uploads.jinja2", {
+                    "data": [],
+                    "unix": get.unix,
+                    "url": request.url_root.rstrip("/"),
+                    "continuation": None,
+                })
+
         if not channel.startswith("UC"):
             resolved = get_channel_id_from_name(channel)
 
@@ -257,6 +349,22 @@ def channel_uploads(channel):
             return get.error()
 
         videos = data.get("videos", [])
+
+        # honor GData's numeric start-index/max-results pagination by
+        # slicing locally, since Invidious only gives us one page at a
+        # time with no way to jump to an arbitrary numeric offset.
+        # Returning an EMPTY page once we run out is what tells the
+        # classic app to stop requesting more pages instead of looping.
+        try:
+            start_index = max(int(request.args.get("start-index", 1)), 1)
+        except (TypeError, ValueError):
+            start_index = 1
+        try:
+            max_results = max(int(request.args.get("max-results", 25)), 1)
+        except (TypeError, ValueError):
+            max_results = 25
+
+        videos = videos[start_index - 1: start_index - 1 + max_results]
 
         clean = []
 
@@ -308,6 +416,104 @@ def channel_uploads(channel):
     except Exception as e:
         print("CHANNEL UPLOADS ERROR:", e, flush=True)
         return get.error()
+
+@video.route("/feeds/api/users/<channel>/favorites")
+def favorites(channel):
+    """Favorites — backed by the real YouTube Liked Videos playlist
+    ('LL' is a reserved special playlist ID that resolves to 'your
+    liked videos' for whichever account the access token belongs to).
+    This used to reuse channel_uploads()'s logic, which made it show
+    the exact same list as Uploads and appears to have triggered a
+    broken 'merge accounts' prompt in the app — hence its own route."""
+    device_id = extract_device_id(request)
+    access_token = get_valid_access_token(device_id)
+
+    url = request.url_root.rstrip("/")
+    empty = get.template("uploads.jinja2", {
+        "data": [], "unix": get.unix, "url": url, "continuation": None,
+    })
+
+    if not access_token:
+        return empty
+
+    try:
+        r = requests.get(
+            "https://www.googleapis.com/youtube/v3/playlistItems",
+            params={"part": "snippet", "playlistId": "LL", "maxResults": 25},
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10,
+        )
+        print("FAVORITES (LL) status:", r.status_code, flush=True)
+        if not r.ok:
+            print("FAVORITES (LL) body:", r.text[:400], flush=True)
+            return empty
+        items = r.json().get("items", [])
+    except Exception as e:
+        print("FAVORITES ERROR:", repr(e), flush=True)
+        return empty
+
+    clean = []
+    for it in items:
+        snippet = it.get("snippet", {})
+        vid_id = snippet.get("resourceId", {}).get("videoId")
+        if not vid_id:
+            continue
+        clean.append({
+            "title": html.escape(snippet.get("title", "Untitled")),
+            "videoId": vid_id,
+            "author": html.escape(snippet.get("videoOwnerChannelTitle", "Unknown")),
+            "authorId": snippet.get("videoOwnerChannelId", "unknown"),
+            "viewCount": 0,
+            "lengthSeconds": 0,
+            "published": 0,
+            "description": "",
+        })
+
+    clean = enrich_view_counts(clean)
+
+    return get.template("uploads.jinja2", {
+        "data": clean,
+        "unix": get.unix,
+        "url": url,
+        "continuation": None,
+    })
+
+# real per-account feeds, backed by the linked Google account's access
+# token via YouTube's internal InnerTube API (Invidious can't serve these
+# since it has no idea who you are — only Google does)
+PERSONAL_BROWSE_IDS = {
+    "newsubscriptionvideos": "FEsubscriptions",
+    "watchhistory": "FEhistory",
+    "watchlater": "VLWL",
+}
+
+@video.route("/feeds/api/users/<channel>/newsubscriptionvideos")
+@video.route("/feeds/api/users/<channel>/watchhistory")
+@video.route("/feeds/api/users/<channel>/watchlater")
+@video.route("/feeds/api/users/<channel>/recommendations")
+def personalized_feed_stub(channel):
+    feed_name = request.path.rstrip("/").split("/")[-1]
+    print("PERSONALIZED FEED HIT:", feed_name, flush=True)
+
+    data = []
+    browse_id = PERSONAL_BROWSE_IDS.get(feed_name)
+
+    if browse_id:
+        device_id = extract_device_id(request)
+        access_token = get_valid_access_token(device_id)
+        if access_token:
+            try:
+                data = fetch_personal_feed(access_token, browse_id, limit=15)
+            except Exception as e:
+                print("PERSONALIZED FEED ERROR:", feed_name, e, flush=True)
+                data = []
+
+    return get.template("uploads.jinja2", {
+        "data": data,
+        "unix": get.unix,
+        "url": request.url_root.rstrip("/"),
+        "continuation": None,
+    })
 
 def get_playlist_from_invidious(playlist_id):
     url = f"{config.URL}/api/v1/playlists/{playlist_id}"
@@ -386,6 +592,8 @@ def get_featured_from_hourly_playlists():
 
         seen.add(vid_id)
 
+        view_count = int(vid.get("viewCount") or vid.get("view_count") or 0)
+
         item = {
             "title": html.escape(title),
             "videoId": vid_id,
@@ -402,7 +610,7 @@ def get_featured_from_hourly_playlists():
                 or get_channel_id_from_name(vid.get("author") or vid.get("uploader") or vid.get("channel"))
                 or "unknown"
             ),
-            "viewCount": int(vid.get("viewCount") or vid.get("view_count") or 0),
+            "viewCount": view_count,
             "lengthSeconds": int(vid.get("lengthSeconds") or vid.get("duration") or 0),
             "published": int(vid.get("published") or vid.get("timestamp") or 0),
             "description": html.escape((vid.get("description") or "")[:120])
@@ -428,10 +636,10 @@ def get_featured_from_hourly_playlists():
 
         if len(data) >= 30:
             random.shuffle(data)
-            return data
+            return enrich_view_counts(data)
 
     random.shuffle(data)
-    return data
+    return enrich_view_counts(data)
 
 channel_id_cache = {}
 
@@ -562,6 +770,10 @@ def frontpage(regioncode="US", popular=None, res=''):
         url = url[:-1]
 
         if data:
+
+            prompt = build_login_prompt(request)
+            if prompt:
+                data = [prompt] + data
 
             if config.SPYING == True:
                 print_with_seperator("Region code: " + regioncode)
@@ -701,6 +913,10 @@ def most_viewed(res=''):
 
     print("MOST VIEWED COUNT:", len(data))
 
+    prompt = build_login_prompt(request)
+    if prompt:
+        data = [prompt] + data
+
     user_agent = request.headers.get('User-Agent', '').lower()
 
     import time
@@ -746,6 +962,76 @@ def cleanup_old_files():
 
 
 # search for videos
+def _handle_batch_request(res=''):
+    """Shared GData batch-query handler. Multiple feeds (History's
+    /feeds/api/videos/batch, Featured's declared .../recently_featured/batch
+    link, etc.) all POST the same kind of <feed><entry><id>...</id></entry>
+    batch body and expect the same kind of response — so this is reused
+    across routes instead of duplicated."""
+    if type(res) == int:
+        res = min(max(res, 144), config.RESMAX)
+
+    url = request.url_root + str(res)
+    if url[-1] == '/':
+        url = url[:-1]
+
+    try:
+        body = request.get_data(as_text=True)
+        root = ET.fromstring(body)
+    except Exception as e:
+        print("BATCH PARSE ERROR:", e, flush=True)
+        return get.error()
+
+    ns = {"atom": "http://www.w3.org/2005/Atom"}
+
+    video_ids = []
+    for entry in root.findall("atom:entry", ns):
+        id_el = entry.find("atom:id", ns)
+        if id_el is not None and id_el.text:
+            video_ids.append(id_el.text.strip().rsplit("/", 1)[-1])
+
+    print("BATCH VIDEO IDS:", video_ids, flush=True)
+
+    clean = []
+    for vid_id in video_ids:
+        data = get.fetch(f"{config.URL}/api/v1/videos/{vid_id}")
+        if not data:
+            continue
+        item = normalize_video(data)
+        if item:
+            clean.append(item)
+
+    print("BATCH RESOLVED COUNT:", len(clean), flush=True)
+
+    return get.template("batch_videos.jinja2", {
+        "data": clean,
+        "unix": get.unix,
+        "url": url,
+    })
+
+@video.route("/feeds/api/videos/batch", methods=["POST"])
+@video.route("/<int:res>/feeds/api/videos/batch", methods=["POST"])
+def videos_batch(res=''):
+    """GData batch query — used by History. The app keeps its own local
+    list of watched video IDs on-device and POSTs them here as a batch
+    <feed> of <entry><id>...</id></entry> elements, expecting metadata
+    for each back in one response."""
+    return _handle_batch_request(res)
+
+@video.route("/feeds/api/standardfeeds/<regioncode>/<popular>/batch", methods=["POST"])
+@video.route("/feeds/api/standardfeeds/<popular>/batch", methods=["POST"])
+@video.route("/<int:res>/feeds/api/standardfeeds/<regioncode>/<popular>/batch", methods=["POST"])
+@video.route("/<int:res>/feeds/api/standardfeeds/<popular>/batch", methods=["POST"])
+def standardfeeds_batch(regioncode="US", popular=None, res=''):
+    """The Featured/Most Viewed template declares this batch link on
+    every response (<link rel='...#batch' href='.../batch' />). It looks
+    like some app action (e.g. Favorites' 'merge' prompt) POSTs to
+    whatever batch link it currently has cached — even from an unrelated
+    screen — and previously got a hard 404 here, which is the likely
+    trigger for the forced sign-out. Handling it the same way as the
+    History batch endpoint avoids that."""
+    return _handle_batch_request(res)
+
 @video.route("/feeds/api/videos")
 @video.route("/feeds/api/videos/")
 @video.route("/<int:res>/feeds/api/videos")
@@ -764,7 +1050,43 @@ def search_videos(res=''):
     search_keyword = request.args.get('q')
 
     if not search_keyword:
-        return get.error()
+        # "Most Recent" tab: the classic app calls this same endpoint with
+        # no q=, just orderby=updated, expecting a general recent-videos
+        # feed rather than a search. Serve trending videos instead of
+        # erroring, using the same safe content-src pattern as Featured.
+        data = get.fetch(f"{config.URL}/api/v1/trending?region=US")
+        if not data:
+            return get.error()
+
+        clean = []
+        for vid in data:
+            # classic YouTube can't play live streams — skip them
+            if vid.get("liveNow") or vid.get("isLive") or vid.get("isUpcoming"):
+                continue
+            item = normalize_video(vid)
+            if item:
+                clean.append(item)
+
+        # trending has the same missing-stats gap Top Rated/Related/
+        # Favorites had — this is what was actually causing the 0 views
+        # and 00:00 duration, not (only) live streams
+        clean = enrich_view_counts(clean)
+
+        if url[-1] == '/':
+            url = url[:-1]
+
+        if "youtube/1.0.0" in user_agent or "youtube v1.0.0" in user_agent:
+            return get.template('classic/featured.jinja2', {
+                'data': clean[:15],
+                'unix': get.unix,
+                'url': url
+            })
+
+        return get.template('featured.jinja2', {
+            'data': clean[:15],
+            'unix': get.unix,
+            'url': url
+        })
     
     # print logs if enabled
     if config.SPYING == True:
@@ -1006,12 +1328,18 @@ def thumbnail(video_id):
 @video.route("/getvideo/<video_id>")
 @video.route("/<int:res>/getvideo/<video_id>")
 def getvideo(video_id, res=None):
+    if video_id == "login_prompt":
+        return "This isn't a real video — check its description for the login link.", 200
+
     import subprocess
     import json
     import os
     import time
 
     t0 = time.time()
+    lock = _get_download_lock(video_id)
+    lock.acquire()
+    _download_semaphore.acquire()
 
     try:
         print("START GETVIDEO:", video_id)
@@ -1135,6 +1463,10 @@ def getvideo(video_id, res=None):
     except Exception as e:
         print("HYBRID ERROR:", e)
         return "Playback failed", 500
+
+    finally:
+        lock.release()
+        _download_semaphore.release()
 
 @video.route("/feeds/api/videos/<video_id>/related")
 @video.route("/<int:res>/feeds/api/videos/<video_id>/related")
