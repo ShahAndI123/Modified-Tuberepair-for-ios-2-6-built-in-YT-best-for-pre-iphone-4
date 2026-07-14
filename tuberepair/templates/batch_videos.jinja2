@@ -37,7 +37,7 @@
     <yt:accessControl action="autoPlay" permission="allowed" />
     <yt:accessControl action="syndicate" permission="allowed" />
     <gd:comments><gd:feedLink href="{{ url }}/api/videos/{{ video['videoId'] }}/comments"/></gd:comments>
-    <yt:statistics favoriteCount="0" viewCount="{{ video['viewCount'] }}" />
+    <yt:statistics favoriteCount="0" viewCount="{{ [video['viewCount'], 2147483647] | min }}" />
     <yt:rating numDislikes="0" numLikes="0" />
     <media:group>
       <media:category label="Music" scheme="http://gdata.youtube.com/schemas/2007/categories.cat">Music</media:category>

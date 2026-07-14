@@ -4,6 +4,9 @@ from modules import get, helpers
 from jinja2 import Environment, FileSystemLoader
 from api.login import extract_device_id, get_valid_access_token, get_logged_in_channel_id
 from api.video import normalize_video
+import xml.etree.ElementTree as ET
+import requests
+import html
 
 playlist = Blueprint("playlist", __name__)
 
@@ -23,14 +26,13 @@ def playlists(channel_id, res=''):
     url = request.url_root + str(res)
     continuationToken = request.args.get('continuation') and '?continuation=' + request.args.get('continuation') or ''
 
-    if channel_id == "default":
+    is_own_playlists = channel_id == "default"
+    access_token = None
+
+    if is_own_playlists:
         device_id = extract_device_id(request)
         access_token = get_valid_access_token(device_id)
-        resolved = get_logged_in_channel_id(access_token) if access_token else None
-        print("PLAYLISTS default-channel resolution:", resolved, flush=True)
-        if resolved:
-            channel_id = resolved
-        else:
+        if not access_token:
             if url[-1] == '/':
                 url = url[:-1]
             return get.template('channel_playlists.jinja2', {
@@ -40,13 +42,65 @@ def playlists(channel_id, res=''):
                 'channel_id': channel_id
             })
 
+    if url[-1] == '/':
+        url = url[:-1]
+
+    if is_own_playlists:
+        # use the authenticated API directly for your own playlists —
+        # Invidious only has access to PUBLIC YouTube data, so a private
+        # or unlisted playlist you just created would never show up
+        # there, even though it was created successfully. This was why
+        # new playlists appeared to "disappear" after relaunching the app.
+        try:
+            r = requests.get(
+                "https://www.googleapis.com/youtube/v3/playlists",
+                params={"part": "snippet,contentDetails", "mine": "true", "maxResults": 25},
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=10,
+            )
+            print("PLAYLISTS (mine=true) status:", r.status_code, flush=True)
+            if not r.ok:
+                print("PLAYLISTS (mine=true) body:", r.text[:400], flush=True)
+                return get.template('channel_playlists.jinja2', {
+                    'data': [], 'continuation': None, 'url': url, 'channel_id': channel_id
+                })
+            items = r.json().get("items", [])
+        except Exception as e:
+            print("PLAYLISTS (mine=true) ERROR:", repr(e), flush=True)
+            return get.template('channel_playlists.jinja2', {
+                'data': [], 'continuation': None, 'url': url, 'channel_id': channel_id
+            })
+
+        clean = []
+        for it in items:
+            snippet = it.get("snippet", {})
+            thumbs = snippet.get("thumbnails", {})
+            thumb_url = (
+                thumbs.get("high", {}).get("url")
+                or thumbs.get("default", {}).get("url")
+                or ""
+            )
+            clean.append({
+                "type": "playlist",
+                "title": html.escape(snippet.get("title", "Untitled")),
+                "playlistId": it.get("id"),
+                "playlistThumbnail": thumb_url,
+                "author": html.escape(snippet.get("channelTitle", "Unknown")),
+                "authorId": snippet.get("channelId", "unknown"),
+                "descriptionHtml": html.escape(snippet.get("description", "")),
+                "videoCount": it.get("contentDetails", {}).get("itemCount", 0),
+            })
+
+        return get.template('channel_playlists.jinja2', {
+            'data': clean,
+            'continuation': None,
+            'url': url,
+            'channel_id': channel_id
+        })
+
     try:
         data = get.fetch(f"{config.URL}/api/v1/channels/{channel_id}/playlists{continuationToken}")
 
-        # Templates have the / at the end, so let's remove it.
-        if url[-1] == '/':
-            url = url[:-1]
-        
         if data:
             return get.template('channel_playlists.jinja2',{
                 'data': data['playlists'],
@@ -62,6 +116,70 @@ def playlists(channel_id, res=''):
 
 # get playlist's video
 # TODO: fix the damn thing
+@playlist.route("/feeds/api/playlists/<playlist_id>", methods=["POST"])
+@playlist.route("/<int:res>/feeds/api/playlists/<playlist_id>", methods=["POST"])
+def add_video_to_playlist(playlist_id, res=''):
+    """Add a video to a playlist, backed by YouTube Data API v3's
+    playlistItems.insert. This is what create_playlist()'s <link
+    rel='edit'> in video.py points to — without a working handler here,
+    the app has nowhere to actually submit the video, which is very
+    likely why 'add to playlist' was failing with no request even
+    firing. UNVERIFIED against a real capture — built against the
+    documented historical GData v2 convention (POST body containing
+    <id>tag:youtube.com,2008:video:VIDEO_ID</id>, same shape as
+    add_favorite in video.py). Test and send the real capture if wrong."""
+    device_id = extract_device_id(request)
+    access_token = get_valid_access_token(device_id)
+    if not access_token:
+        return get.error()
+
+    try:
+        body = request.get_data(as_text=True)
+        root = ET.fromstring(body)
+    except Exception as e:
+        print("ADD_TO_PLAYLIST PARSE ERROR:", e, flush=True)
+        return get.error()
+
+    ns = {"atom": "http://www.w3.org/2005/Atom"}
+    id_el = root.find("atom:id", ns)
+    if id_el is None:
+        id_el = root.find("id")
+
+    if id_el is None or not id_el.text:
+        print("ADD_TO_PLAYLIST: no video id found in body", flush=True)
+        return get.error()
+
+    video_id = id_el.text.strip().rsplit(":", 1)[-1]
+
+    try:
+        r = requests.post(
+            "https://www.googleapis.com/youtube/v3/playlistItems",
+            params={"part": "snippet"},
+            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+            json={
+                "snippet": {
+                    "playlistId": playlist_id,
+                    "resourceId": {"kind": "youtube#video", "videoId": video_id},
+                }
+            },
+            timeout=10,
+        )
+        print("ADD_TO_PLAYLIST status:", r.status_code, flush=True)
+        if not r.ok:
+            print("ADD_TO_PLAYLIST body:", r.text[:400], flush=True)
+            return get.error()
+    except Exception as e:
+        print("ADD_TO_PLAYLIST ERROR:", repr(e), flush=True)
+        return get.error()
+
+    return Response(
+        "<?xml version='1.0' encoding='UTF-8'?>"
+        "<entry xmlns='http://www.w3.org/2005/Atom'>"
+        f"<id>tag:youtube.com,2008:video:{video_id}</id>"
+        "</entry>",
+        mimetype="application/atom+xml"
+    )
+
 @playlist.route("/feeds/api/playlists/<playlist_id>")
 @playlist.route("/<int:res>/feeds/api/playlists/<playlist_id>")
 def playlists_video(playlist_id, res=''):
