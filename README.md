@@ -1,6 +1,6 @@
 # Setting it up
 
-INSTALL:
+### INSTALL:
 - yt-dlp
 - ffmpeg
 - python (id try python 3.11)
@@ -24,6 +24,7 @@ Still confused on how to set it up? Here's a tutorial https://youtu.be/M25eJ0s6X
 - History (if you logged in) may not show for ios 3 users and idk about "my videos". Hopefully a fix soon
 - Playlists, for some reason, crash on ios 3
 - Pages like featured, most viewed, top rated, and most recent loads slow, but we are just experimenting things to make the best search results
+- commenting, adding videos to playlists, and translating channel IDs to names dont work for now
 - There is no real video description because you can't directly get the description from Invidious. Even if I did add, it makes it slow to load videos on the front page because they are separate. But it's not crazy slow (takes 20 seconds to load), but if people really want it, I guess I can add it.
 - the channel names are all just channel IDs (just like Lincoln's tuberepair) because of an XML change that's required for channel uplaods to work
   - To compromise for it, it'll be added in the description (ex. Author name - Title of video)
