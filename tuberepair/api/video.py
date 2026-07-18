@@ -12,6 +12,7 @@ from api.login import (
     fetch_personal_feed,
 )
 import os
+import re
 import time
 import threading
 import xml.etree.ElementTree as ET
@@ -412,6 +413,28 @@ def build_login_prompt(req):
         "description": "Go to this URL on any device to create a login and link this one."
     }
 
+def space_safe_channel_name(name):
+    """Experimental workaround: the classic app appears to build its
+    'More Videos' (uploader uploads) request directly from the
+    displayed channel name rather than the authorId we provide (see
+    CHANNEL ROUTE HIT logs showing the raw name, e.g. 'Northernlion',
+    used as the URL path segment) — and that request seems to never
+    even get sent when the name contains a literal space (zero server
+    activity, works fine for single-word names).
+
+    First tried substituting a non-breaking space (U+00A0) for the
+    regular space — no change, still zero server activity. Trying
+    literal '%20' text instead: if the app concatenates this string
+    directly into a URL without percent-encoding it itself, handing it
+    an already-encoded space might get through where a raw one didn't.
+    Trade-off: since this same field is also the displayed name, it
+    will show on screen as 'Warner%20Bros.%20and%20IMAX' rather than
+    with real spaces — ugly, but only worth keeping if it actually
+    fixes the request going out at all."""
+    if not name:
+        return name
+    return name.replace(" ", "%20")
+
 def normalize_video(vid):
     title = vid.get("title") or "Untitled"
     video_id = vid.get("videoId") or vid.get("id")
@@ -452,7 +475,8 @@ def normalize_video(vid):
     return {
         "title": html.escape(str(title)),
         "videoId": str(video_id),
-        "author": html.escape(raw_author),
+        "author": html.escape(space_safe_channel_name(raw_author)),
+        "author_urlsafe": html.escape(space_safe_channel_name(raw_author)),
         "authorId": author_id,
         "viewCount": safe_int(
             vid.get("viewCount")
@@ -492,7 +516,7 @@ def channel_uploads(channel):
                 })
 
         if not channel.startswith("UC"):
-            resolved = get_channel_id_from_name(channel)
+            resolved = resolve_channel_id_for_credit(channel)
 
             if resolved and resolved != "unknown":
                 channel = resolved
@@ -626,7 +650,7 @@ def subscriptions_list(channel):
             "title": html.escape(snippet.get("title", "Untitled")),
             "subscriptionId": sub_id,
             "channelId": channel_id,
-            "author": html.escape(snippet.get("title", "Unknown")),
+            "author": html.escape(space_safe_channel_name(snippet.get("title", "Unknown"))),
             "authorId": channel_id,
             "thumbnail": thumb_url,
             "description": html.escape(snippet.get("description", "")[:500]),
@@ -809,7 +833,7 @@ def favorites(channel):
         clean.append({
             "title": html.escape(snippet.get("title", "Untitled")),
             "videoId": vid_id,
-            "author": html.escape(snippet.get("videoOwnerChannelTitle", "Unknown")),
+            "author": html.escape(space_safe_channel_name(snippet.get("videoOwnerChannelTitle", "Unknown"))),
             "authorId": snippet.get("videoOwnerChannelId", "unknown"),
             "viewCount": 0,
             "lengthSeconds": 0,
@@ -1094,12 +1118,12 @@ def get_videos_via_search(query, limit=15, sort_by=None, date=None):
         author_name = item.get("author") or "YouTube"
         author_id = item.get("authorId")
         if not author_id:
-            author_id = get_channel_id_from_name(author_name)
+            author_id = resolve_channel_id_for_credit(author_name)
 
         clean.append({
             "title": html.escape(item.get("title") or "Untitled"),
             "videoId": vid_id,
-            "author": html.escape(author_name),
+            "author": html.escape(space_safe_channel_name(author_name)),
             "authorId": author_id or "unknown",
             "viewCount": int(item.get("viewCount") or 0),
             "lengthSeconds": int(item.get("lengthSeconds") or 0),
@@ -1160,12 +1184,12 @@ def get_featured_from_hourly_playlists():
         item = {
             "title": html.escape(title),
             "videoId": vid_id,
-            "author": html.escape(
+            "author": html.escape(space_safe_channel_name(
                 vid.get("author")
                 or vid.get("uploader")
                 or vid.get("channel")
                 or "Unknown"
-            ),
+            )),
             "authorId": (
                 vid.get("authorId")
                 or vid.get("uploader_id")
@@ -1181,7 +1205,7 @@ def get_featured_from_hourly_playlists():
         item["authorId"] = (
             item.get("authorId")
             if item.get("authorId") not in ["unknown", "Unknown", "", None]
-            else get_channel_id_from_name(item.get("author"))
+            else resolve_channel_id_for_credit(item.get("author"))
         )
 
         print(
@@ -1319,6 +1343,31 @@ def get_channel_name_from_id(channel_id):
 
     return None
 
+def resolve_channel_id_for_credit(name):
+    """Wraps get_channel_id_from_name to handle compound/collab credits
+    like 'Warner Bros. and IMAX' or 'Spinnin' Records and The Second
+    Voice' — these aren't real single channels, so a direct name search
+    for the whole string can fail (or land on an unrelated channel via
+    the 'fallback first result' behavior in get_channel_id_from_name).
+    Try the full string first, then fall back to just the first credited
+    name, which is usually the actual uploader."""
+    if not name:
+        return "unknown"
+
+    resolved = get_channel_id_from_name(name)
+    if resolved and resolved != "unknown":
+        return resolved
+
+    parts = re.split(r"\s+(?:and|&|x|with)\s+|,\s*", name, flags=re.IGNORECASE)
+    parts = [p.strip() for p in parts if p.strip()]
+    if len(parts) > 1:
+        first_segment_resolved = get_channel_id_from_name(parts[0])
+        if first_segment_resolved and first_segment_resolved != "unknown":
+            print("CREDIT SPLIT RESOLVED:", repr(name), "->", parts[0], "->", first_segment_resolved, flush=True)
+            return first_segment_resolved
+
+    return "unknown"
+
 def get_channel_id_from_name(name):
 
     if not name:
@@ -1400,45 +1449,29 @@ def frontpage(regioncode="US", popular=None, res=''):
     # fetch api from invidious
     import subprocess, json
 
-    search_query = FEED_SEARCH_QUERIES.get(popular, "trending videos")
-
+    # Reverted to a playlist-based approach for Featured/Most Viewed/Top
+    # Rated: a curated YouTube playlist, not a live q=* search. This is
+    # simpler and its entries are far less likely to have the
+    # collab-credit authorId problem (e.g. "Warner Bros. and IMAX") that
+    # search results ran into, since playlist entries are almost always
+    # single real channels.
+    #
+    # Trade-off: the Today/This Week/All Time time-range tabs on Most
+    # Viewed/Top Rated no longer actually filter anything — a fixed
+    # curated playlist isn't scoped to a time window, so all three tabs
+    # will show the same content now. If that filtering is wanted back,
+    # it needs the search-based approach this replaces.
     if popular == "most_viewed":
-        # "most viewed videos" as a literal search phrase just matches
-        # titles containing that text, not genuinely popular content.
-        # A broad query combined with real view-count sorting gets
-        # actual highly-viewed videos instead.
-        #
-        # The classic app's Most Viewed tab lets you pick a time range
-        # (Today / This Week / All Time), sent as ?time=today|this_week|all_time.
-        # Map that onto Invidious's own `date` search filter.
-        time_param = request.args.get('time', 'all_time')
-        date_filter = helpers.valid_most_viewed_time.get(time_param)
-        print("MOST VIEWED TIME FILTER:", time_param, "->", date_filter, flush=True)
-        data = get_videos_via_search("official", sort_by="view_count", date=date_filter)
-    elif popular == "top_rated":
-        # Same Today / This Week / All Time selector as Most Viewed,
-        # applied to Top Rated's own rating-based sort.
-        time_param = request.args.get('time', 'all_time')
-        date_filter = helpers.valid_most_viewed_time.get(time_param)
-        print("TOP RATED TIME FILTER:", time_param, "->", date_filter, flush=True)
-        data = get_videos_via_search("official", sort_by="rating", date=date_filter)
+        data = get_most_viewed_from_playlist()
     else:
-        data = get_videos_via_search(search_query)
+        data = get_featured_from_hourly_playlists()
 
     if popular == "most_viewed" and data:
         filtered = [item for item in data if item.get("viewCount", 0) < 1_500_000_000]
         if filtered:
             data = filtered
 
-    if not data:
-        print("SEARCH-BASED FEED EMPTY, FALLING BACK TO PLAYLIST-BASED APPROACH", flush=True)
-        if popular == "most_viewed":
-            data = get_most_viewed_from_playlist()
-        else:
-            data = get_featured_from_hourly_playlists()
-    
     print("POPULAR:", popular)
-    print("QUERY:", search_query)
     
     import time, html
 
@@ -1563,8 +1596,6 @@ def get_most_viewed_from_playlist():
 @video.route("/<int:res>/feeds/api/most_viewed")
 def most_viewed(res=''):
 
-    import subprocess, json, html
-
     print("MOST VIEWED ROUTE HIT")
 
     # Clamp res
@@ -1573,121 +1604,15 @@ def most_viewed(res=''):
 
     url = request.url_root + str(res)
 
-    import time
-
-    cache_key = "most_viewed"
-    now = time.time()
-
     print("MOST VIEWED RELOAD (no whole-feed cache)")
 
-    # Same Today / This Week / All Time selector as the standardfeeds
-    # Most Viewed tab: ?time=today|this_week|all_time
-    time_param = request.args.get('time', 'all_time')
-    date_filter = helpers.valid_most_viewed_time.get(time_param)
-    print("MOST VIEWED TIME FILTER:", time_param, "->", date_filter, flush=True)
-
-    # Real view-count-sorted search (optionally scoped to a date range)
-    # instead of a fixed "viral trending popular videos" guess — that
-    # phrase just matched titles containing those words, not videos
-    # that were actually most-viewed.
-    data = get_videos_via_search("official", sort_by="view_count", date=date_filter)
+    # Reverted to the playlist-based approach — see the comment in
+    # frontpage() for why. Note this means the Today/This Week/All Time
+    # tabs no longer filter anything here either.
+    data = get_most_viewed_from_playlist()
     filtered = [item for item in data if item.get("viewCount", 0) < 1_500_000_000]
     if filtered:
         data = filtered
-
-    if data:
-        data = enrich_view_counts(data)
-
-        if url[-1] == '/':
-            url = url[:-1]
-
-        print("MOST VIEWED COUNT:", len(data))
-
-        prompt = build_login_prompt(request)
-        if prompt:
-            data = [prompt] + data
-
-        user_agent = request.headers.get('User-Agent', '').lower()
-
-        offset = int(time.time()) % len(data) if data else 0
-        data = data[offset:] + data[:offset]
-
-        if "youtube/1.0.0" in user_agent or "youtube v1.0.0" in user_agent:
-            return get.template('classic/featured.jinja2', {
-                'data': data[:15],
-                'unix': get.unix,
-                'url': url
-            })
-
-        return get.template('featured.jinja2', {
-            'data': data[:15],
-            'unix': get.unix,
-            'url': url
-        })
-
-    print("MOST VIEWED: search-based fetch empty, falling back to yt-dlp", flush=True)
-
-    result = subprocess.run(
-        ["yt-dlp", "ytsearch15:viral trending popular videos", "--dump-json", "--no-playlist"],
-        capture_output=True,
-        text=True
-    )
-
-    parsed_vids = []
-    for line in result.stdout.splitlines():
-        try:
-            vid = json.loads(line)
-            if vid.get("id") and vid.get("duration") != 0 and not vid.get("is_live"):
-                parsed_vids.append(vid)
-        except Exception as e:
-            print("MOST VIEWED PARSE ERROR:", e)
-
-    # pre-warm the channel-id cache in parallel instead of the previous
-    # code's redundant serial get_channel_id_from_name() calls (it was
-    # called twice per video, one-at-a-time — same bottleneck Featured had)
-    unique_names = {
-        (vid.get("uploader") or vid.get("channel"))
-        for vid in parsed_vids
-        if not (vid.get("channel_id") or vid.get("uploader_id"))
-        and (vid.get("uploader") or vid.get("channel"))
-    }
-    uncached_names = [n for n in unique_names if n not in channel_id_cache]
-    if uncached_names:
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            futures = [executor.submit(get_channel_id_from_name, n) for n in uncached_names]
-            for future in as_completed(futures):
-                future.result()
-
-    data = []
-
-    for vid in parsed_vids:
-        try:
-            if vid.get("live_status") == "is_live" or vid.get("is_live"):
-                continue
-
-            item = {
-                "title": html.escape(vid.get("title") or "Untitled"),
-                "videoId": vid.get("id"),
-                "author": html.escape(vid.get("uploader") or "Unknown"),
-                "authorId": vid.get("channel_id") or vid.get("uploader_id") or "unknown",
-                "viewCount": int(vid.get("view_count") or 0),
-                "lengthSeconds": int(vid.get("duration") or 0),
-                "published": int(vid.get("timestamp") or 0),
-                "description": html.escape((vid.get("description") or "")[:120])
-            }
-
-            item = apply_cached_metadata(item)
-            data.append(item)
-
-        except Exception as e:
-            print("MOST VIEWED ERROR:", e)
-
-    data = enrich_view_counts(data)
-    filtered = [item for item in data if item.get("viewCount", 0) < 1_500_000_000]
-    if filtered:
-        data = filtered
-    else:
-        print("MOST VIEWED (yt-dlp route): under-1B filter would empty the list, keeping unfiltered", flush=True)
 
     if url[-1] == '/':
         url = url[:-1]
@@ -1700,10 +1625,8 @@ def most_viewed(res=''):
 
     user_agent = request.headers.get('User-Agent', '').lower()
 
-    import time
-    if data:
-        offset = int(time.time()) % len(data)
-        data = data[offset:] + data[:offset]
+    offset = int(time.time()) % len(data) if data else 0
+    data = data[offset:] + data[:offset]
 
     if "youtube/1.0.0" in user_agent or "youtube v1.0.0" in user_agent:
         return get.template('classic/featured.jinja2', {
@@ -2054,8 +1977,8 @@ def search_videos(res=''):
             item = {
                 "title": html.escape(str(title)),
                 "videoId": vid_id,
-                "author": html.escape(str(author)),
-                "authorId": vid.get("authorId") or vid.get("uploader_id") or vid.get("channel_id") or get_channel_id_from_name(vid.get("author") or vid.get("uploader") or vid.get("channel")) or  "unknown",
+                "author": html.escape(space_safe_channel_name(str(author))),
+                "authorId": vid.get("authorId") or vid.get("uploader_id") or vid.get("channel_id") or resolve_channel_id_for_credit(vid.get("author") or vid.get("uploader") or vid.get("channel")) or  "unknown",
                 "viewCount": int(view_count or 0),
                 "lengthSeconds": int(duration or 0),
                 "published": int(published or 0),
@@ -2550,8 +2473,8 @@ def get_suggested(video_id, res=''):
             data.append({
                 "title": html.escape(str(vid_title)),
                 "videoId": vid_id,
-                "author": html.escape(str(vid.get("author") or "Unknown")),
-                "authorId": vid.get("authorId") or get_channel_id_from_name(vid.get("author") or vid.get("uploader") or vid.get("channel")) or "unknown",
+                "author": html.escape(space_safe_channel_name(str(vid.get("author") or "Unknown"))),
+                "authorId": vid.get("authorId") or resolve_channel_id_for_credit(vid.get("author") or vid.get("uploader") or vid.get("channel")) or "unknown",
                 "viewCount": safe_int(vid.get("viewCount") or 0),
                 "lengthSeconds": safe_int(vid.get("lengthSeconds") or 0),
                 "published": safe_published(vid.get("published") or 0),

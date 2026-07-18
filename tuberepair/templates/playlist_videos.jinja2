@@ -3,7 +3,7 @@
 	xmlns='http://www.w3.org/2005/Atom'
 	xmlns:gd='http://schemas.google.com/g/2005'
 	xmlns:openSearch='http://a9.com/-/spec/opensearch/1.1/'
-	xmlns:yt='{{url}}/schemas/2007'
+	xmlns:yt='http://gdata.youtube.com/schemas/2007'
 	xmlns:media='http://search.yahoo.com/mrss/' gd:etag='W/&quot;YDwqeyM.&quot;'>
 	<id>{{url}}/feeds/api/playlists/{{playlist_id}}</id>
 	<updated>2012-08-23T12:33:58.000Z</updated>
@@ -22,14 +22,14 @@
 			<id>tag:youtube.com,2008:playlist:{{playlist_id}}:{{video['videoId']}}</id>
 			<published>2012-08-23T12:33:58.000Z</published>
 			<updated>2012-08-23T12:33:58.000Z</updated>
-			<category scheme='https://schemas.google.com/g/2005#kind' term='{{url}}/schemas/1970#video'/>
-			<category scheme='{{url}}/schemas/1970/categories.cat' term='Howto' label='Howto &amp; Style'/>
+			<category scheme='https://schemas.google.com/g/2005#kind' term='http://gdata.youtube.com/schemas/2007#video'/>
+			<category scheme='http://gdata.youtube.com/schemas/2007/categories.cat' term='Howto' label='Howto &amp; Style'/>
 			<title>{{video['title']}}</title>
 			<content type='application/x-shockwave-flash' src="https://www.youtube.com/v/{{video['videoId']}}?version=3&amp;f=playlists&amp;app=youtube_gvideo"/>
 			<link rel='alternate' type='text/html' href="https://www.youtube.com/watch?v={{video['videoId']}}&amp;feature=youtube_gvideo"/>
 			<link rel='http://gdata.youtube.com/schemas/2007#video.related' type='application/atom+xml' href="{{url}}/feeds/api/videos/{{video['videoId']}}/related"/>
-			<link rel='{{url}}/schemas/1970#mobile' type='text/html' href="https://m.youtube.com/details?v={{video['videoId']}}"/>
-			<link rel='{{url}}/schemas/1970#uploader' type='application/atom+xml' href="{{url}}/feeds/api/users/{{video['authorId']}}?v=2"/>
+			<link rel='http://gdata.youtube.com/schemas/2007#mobile' type='text/html' href="https://m.youtube.com/details?v={{video['videoId']}}"/>
+			<link rel='http://gdata.youtube.com/schemas/2007#uploader' type='application/atom+xml' href="{{url}}/feeds/api/users/{{video['authorId']}}?v=2"/>
 			<link rel='related' type='application/atom+xml' href="{{url}}/feeds/api/videos/{{video['videoId']}}?v=2"/>
 			<link rel='self' type='application/atom+xml' href="{{url}}/feeds/api/playlists/{{playlist_id}}"/>
 			<link rel='edit' type='application/atom+xml' href="{{url}}/feeds/api/playlists/{{playlist_id}}"/>
@@ -47,11 +47,11 @@
 			<yt:accessControl action='autoPlay' permission='allowed'/>
 			<yt:accessControl action='syndicate' permission='allowed'/>
 			<gd:comments>
-				<gd:feedLink rel='{{url}}/schemas/1970#comments' href="{{url}}/api/videos/{{video['videoId']}}/comments?v=2" countHint='5'/>
+				<gd:feedLink rel='http://gdata.youtube.com/schemas/2007#comments' href="{{url}}/api/videos/{{video['videoId']}}/comments?v=2" countHint='5'/>
 			</gd:comments>
 			<yt:location>Paris ,FR</yt:location>
 			<media:group>
-				<media:category label='Howto &amp; Style' scheme='{{url}}/schemas/1970/categories.cat'>Howto</media:category>
+				<media:category label='Howto &amp; Style' scheme='http://gdata.youtube.com/schemas/2007/categories.cat'>Howto</media:category>
 				<media:content url="https://www.youtube.com/v/{{video['videoId']}}?version=3&amp;f=playlists&amp;app=youtube_gvideo" type='application/x-shockwave-flash' medium='video' isDefault='true' expression='full' duration='0' yt:format='5'/>
 				<media:content url="{{url}}/{{video['videoId']}}.3gpp" type='video/3gpp' medium='video' expression='full' duration='0' yt:format='1'/>
 				<media:content url="{{url}}/{{video['videoId']}}.3gpp" type='video/3gpp' medium='video' expression='full' duration='0' yt:format='6'/>

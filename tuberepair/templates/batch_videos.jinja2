@@ -26,7 +26,7 @@
     {% endif %}
     <link rel="self" type="application/atom+xml" href="{{ url }}/feeds/api/videos/{{ video['videoId'] }}" />
     <author>
-      <n>{{ video['author'] }}</n>
+      <n>{{ video['author_urlsafe'] }}</n>
       <uri>{{ url }}/feeds/api/users/{{ video['authorId'] }}</uri>
       <yt:userId>{{ video['authorId'] }}</yt:userId>
     </author>
@@ -43,8 +43,8 @@
       <media:category label="Music" scheme="http://gdata.youtube.com/schemas/2007/categories.cat">Music</media:category>
       <media:content url="{{ url }}/getvideo/{{ video['videoId'] }}" type="video/mp4" medium="video" isDefault="true" expression="full" duration="{{ video['lengthSeconds'] }}" yt:format="3" />
       <media:content url="{{ url }}/getvideo/{{ video['videoId'] }}" type="video/mp4" medium="video" expression="full" duration="{{ video['lengthSeconds'] }}" yt:format="8" />
-      <media:credit role="uploader" scheme="urn:youtube" yt:display="{{ video['author'] }}">{{ video['author'] }}</media:credit>
-      <media:description type="plain">By {{ video['author'] }} - {{ video['title'] }}</media:description>
+      <media:credit role="uploader" scheme="urn:youtube" yt:display="{{ video['author_urlsafe'] }}">{{ video['author_urlsafe'] }}</media:credit>
+      <media:description type="plain">By {{ video['author_urlsafe'] }} - {{ video['title'] }}</media:description>
       <media:keywords></media:keywords>
       <media:license type="text/html" href="http://www.youtube.com/t/terms">youtube</media:license>
       <media:player url="{{ url }}/getvideo/{{ video['videoId'] }}" />

@@ -3,11 +3,11 @@
         xmlns='http://www.w3.org/2005/Atom'
         xmlns:gd='http://schemas.google.com/g/2005'
         xmlns:openSearch='http://a9.com/-/spec/opensearch/1.1/'
-        xmlns:yt='{{url}}/schemas/2007'
+        xmlns:yt='http://gdata.youtube.com/schemas/2007'
         xmlns:media='http://search.yahoo.com/mrss/' gd:etag='W/&quot;DkcBQ3g-fip7I2A9XRRXEUw.&quot;'>
         <id>tag:youtube.com,2008:channels</id>
         <updated>2015-02-16T19:14:12.656Z</updated>
-        <category scheme='http://schemas.google.com/g/2005#kind' term='{{url}}/schemas/2007#channel'/>
+        <category scheme='http://schemas.google.com/g/2005#kind' term='http://gdata.youtube.com/schemas/2007#channel'/>
         <title>Channels matching: webauditors</title>
         <logo>http://www.gstatic.com/youtube/img/logo.png</logo>
         <link rel='http://schemas.google.com/g/2006#spellcorrection' type='application/atom+xml' href='{{url}}/feeds/api/channels?q=web+auditors&amp;start-index=1&amp;max-results=1&amp;oi=spell&amp;spell=1&amp;v=2' title='web auditors'/>
@@ -33,13 +33,13 @@
 			<id>tag:youtube.com,2008:video:{{info['videoId']}}</id>
 			<published>{{'published' in info and unix(info['published']) or unix('0')}}</published>
 			<updated>{{'published' in info and unix(info['published']) or unix('0')}}</updated>
-			<category scheme='https://schemas.google.com/g/2005#kind' term='https://gdata.youtube.com/schemas/1970#video'/>
-			<category scheme='https://gdata.youtube.com/schemas/1970/categories.cat' term='Howto' label='Howto &amp; Style'/>
+			<category scheme='https://schemas.google.com/g/2005#kind' term='https://gdata.youtube.com/schemas/2007#video'/>
+			<category scheme='https://gdata.youtube.com/schemas/2007/categories.cat' term='Howto' label='Howto &amp; Style'/>
 			<title>{{info['title']}}</title>
 			<content type='application/x-shockwave-flash' src="https://www.youtube.com/v/{{info['videoId']}}?version=3&amp;f=playlists&amp;app=youtube_gdata"/>
 			<link rel='alternate' type='text/html' href="https://www.youtube.com/watch?v={{info['videoId']}}&amp;feature=youtube_gdata"/>
 			<link rel='http://gdata.youtube.com/schemas/2007#video.related' type='application/atom+xml' href="{{url}}/feeds/api/videos/{{info['videoId']}}/related"/>
-			<link rel='https://gdata.youtube.com/schemas/1970#mobile' type='text/html' href="https://m.youtube.com/details?v={{info['videoId']}}"/>
+			<link rel='https://gdata.youtube.com/schemas/2007#mobile' type='text/html' href="https://m.youtube.com/details?v={{info['videoId']}}"/>
 			{% if info['authorId'] != "unknown" and info['authorId'] != "Unknown" %}
 			<link rel='http://gdata.youtube.com/schemas/2007#uploader' type='application/atom+xml' href="{{url}}/feeds/api/users/{{info['authorId']}}/uploads?v=2"/>
 			{% endif %}
@@ -59,11 +59,11 @@
 			<yt:accessControl action='autoPlay' permission='allowed'/>
 			<yt:accessControl action='syndicate' permission='allowed'/>
 			<gd:comments>
-				<gd:feedLink rel='https://gdata.youtube.com/schemas/1970#comments' href="{{url}}/api/videos/{{info['videoId']}}/comments?v=2" countHint='5'/>
+				<gd:feedLink rel='https://gdata.youtube.com/schemas/2007#comments' href="{{url}}/api/videos/{{info['videoId']}}/comments?v=2" countHint='5'/>
 			</gd:comments>
 			<yt:location>Paris ,FR</yt:location>
 			<media:group>
-				<media:category label='Howto &amp; Style' scheme='https://gdata.youtube.com/schemas/1970/categories.cat'>Howto</media:category>
+				<media:category label='Howto &amp; Style' scheme='https://gdata.youtube.com/schemas/2007/categories.cat'>Howto</media:category>
 				<media:content url="https://www.youtube.com/v/{{info['videoId']}}?version=3&amp;f=playlists&amp;app=youtube_gdata" type='application/x-shockwave-flash' medium='video' isDefault='true' expression='full' duration='0' yt:format='5'/>
 				<media:content url="{{url}}/getvideo/{{info['videoId']}}" type='video/3gpp' medium='video' expression='full' duration='0' yt:format='1'/>
 				<media:content url="{{url}}/getvideo/{{info['videoId']}}" type='video/3gpp' medium='video' expression='full' duration='0' yt:format='6'/>
@@ -97,3 +97,4 @@
 		</entry>
 	{% endfor %}
 {% endif %}
+</feed>

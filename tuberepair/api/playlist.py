@@ -3,7 +3,7 @@ import config
 from modules import get, helpers
 from jinja2 import Environment, FileSystemLoader
 from api.login import extract_device_id, get_valid_access_token, get_logged_in_channel_id
-from api.video import normalize_video, get_channel_name_from_id
+from api.video import normalize_video, get_channel_name_from_id, space_safe_channel_name
 import xml.etree.ElementTree as ET
 import requests
 import html
@@ -85,7 +85,7 @@ def playlists(channel_id, res=''):
                 "title": html.escape(snippet.get("title", "Untitled")),
                 "playlistId": it.get("id"),
                 "playlistThumbnail": thumb_url,
-                "author": html.escape(snippet.get("channelTitle", "Unknown")),
+                "author": html.escape(space_safe_channel_name(snippet.get("channelTitle", "Unknown"))),
                 "authorId": snippet.get("channelId", "unknown"),
                 "descriptionHtml": html.escape(snippet.get("description", "")),
                 "videoCount": it.get("contentDetails", {}).get("itemCount", 0),
@@ -108,7 +108,7 @@ def playlists(channel_id, res=''):
                 if author.startswith("UC") and len(author) > 15:
                     resolved = get_channel_name_from_id(pl.get("authorId") or author)
                     if resolved:
-                        pl["author"] = resolved
+                        pl["author"] = space_safe_channel_name(resolved)
 
             return get.template('channel_playlists.jinja2',{
                 'data': playlists_clean,
