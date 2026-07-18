@@ -2,7 +2,6 @@
     <feed
         xmlns='http://www.w3.org/2005/Atom'
         xmlns:gd='http://schemas.google.com/g/2005'
-		<title>SEARCH RESULTS TEST</title>
         xmlns:openSearch='http://a9.com/-/spec/opensearch/1.1/'
         xmlns:yt='{{url}}/schemas/2007'
         xmlns:media='http://search.yahoo.com/mrss/' gd:etag='W/&quot;DkcBQ3g-fip7I2A9XRRXEUw.&quot;'>
@@ -31,7 +30,7 @@
 {% if data %}
 	{% for info in data %}
 		<entry gd:etag='W/&quot;YDwqeyM.&quot;'>
-			<id>tag:youtube.com,2008:playlist:{{info['videoId']}}:{{info['videoId']}}</id>
+			<id>tag:youtube.com,2008:video:{{info['videoId']}}</id>
 			<published>{{'published' in info and unix(info['published']) or unix('0')}}</published>
 			<updated>{{'published' in info and unix(info['published']) or unix('0')}}</updated>
 			<category scheme='https://schemas.google.com/g/2005#kind' term='https://gdata.youtube.com/schemas/1970#video'/>
@@ -39,16 +38,16 @@
 			<title>{{info['title']}}</title>
 			<content type='application/x-shockwave-flash' src="https://www.youtube.com/v/{{info['videoId']}}?version=3&amp;f=playlists&amp;app=youtube_gdata"/>
 			<link rel='alternate' type='text/html' href="https://www.youtube.com/watch?v={{info['videoId']}}&amp;feature=youtube_gdata"/>
-			<link rel='http://gdata.youtube.com/schemas/2007#video.related' type='application/atom+xml' href="https://gdata.youtube.com/feeds/api/videos/{{info['videoId']}}/related"/>
+			<link rel='http://gdata.youtube.com/schemas/2007#video.related' type='application/atom+xml' href="{{url}}/feeds/api/videos/{{info['videoId']}}/related"/>
 			<link rel='https://gdata.youtube.com/schemas/1970#mobile' type='text/html' href="https://m.youtube.com/details?v={{info['videoId']}}"/>
 			{% if info['authorId'] != "unknown" and info['authorId'] != "Unknown" %}
 			<link rel='http://gdata.youtube.com/schemas/2007#uploader' type='application/atom+xml' href="{{url}}/feeds/api/users/{{info['authorId']}}/uploads?v=2"/>
 			{% endif %}
-			<link rel='related' type='application/atom+xml' href="https://gdata.youtube.com/feeds/api/videos/{{info['videoId']}}?v=2"/>
-			<link rel='self' type='application/atom+xml' href='https://gdata.youtube.com/feeds/api/playlists/8E2186857EE27746/PLyl9mKRbpNIpJC5B8qpcgKX8v8NI62Jho?v=2'/>
+			<link rel='related' type='application/atom+xml' href="{{url}}/feeds/api/videos/{{info['videoId']}}?v=2"/>
+			<link rel='self' type='application/atom+xml' href="{{url}}/feeds/api/videos/{{info['videoId']}}?v=2"/>
 			<author>
 				<name>{{info['author']}}</name>
-				<uri>{{url}}/feeds/api/users/{{info['authorId']}}/uploads</uri>
+				<uri>{{url}}/feeds/api/users/{{info['authorId']}}</uri>
 				<yt:userId>{{info['authorId']}}</yt:userId>
 			</author>
 			<yt:accessControl action='comment' permission='allowed'/>
@@ -66,9 +65,9 @@
 			<media:group>
 				<media:category label='Howto &amp; Style' scheme='https://gdata.youtube.com/schemas/1970/categories.cat'>Howto</media:category>
 				<media:content url="https://www.youtube.com/v/{{info['videoId']}}?version=3&amp;f=playlists&amp;app=youtube_gdata" type='application/x-shockwave-flash' medium='video' isDefault='true' expression='full' duration='0' yt:format='5'/>
-				<media:content url="{{url}}/getvideo/{{info['videoId']}}" type='video/3gpp' type='video/3gpp' medium='video' expression='full' duration='0' yt:format='1'/>
-				<media:content url="{{url}}/getvideo/{{info['videoId']}}" type='video/3gpp' type='video/3gpp' medium='video' expression='full' duration='0' yt:format='6'/>
-				<media:credit role='uploader' scheme='urn:youtube' yt:display="{{info['author']}}" yt:type='partner'>{{info['authorId']}}</media:credit>
+				<media:content url="{{url}}/getvideo/{{info['videoId']}}" type='video/3gpp' medium='video' expression='full' duration='0' yt:format='1'/>
+				<media:content url="{{url}}/getvideo/{{info['videoId']}}" type='video/3gpp' medium='video' expression='full' duration='0' yt:format='6'/>
+				<media:credit role='uploader' scheme='urn:youtube' yt:display="{{info['author']}}" yt:type='partner'>{{info['author']}}</media:credit>
 				<media:description type='plain'>{{info['description']}}</media:description>
 				<media:keywords/>
 				<media:license type='text/html' href='https://www.youtube.com/t/terms'>youtube</media:license>
@@ -91,7 +90,7 @@
 			</media:group>
 			<gd:rating average='0' max='0' min='0' numRaters='0' rel='https://schemas.google.com/g/2005#overall'/>
 			<yt:recorded>1970-08-22</yt:recorded>
-			<yt:statistics favoriteCount='0' viewCount="{{info['viewCount']}}"/>
+			<yt:statistics favoriteCount='0' viewCount="{{ [info['viewCount'], 2147483647] | min }}"/>
 			<yt:rating numDislikes='100' numLikes='10000'/>
 			<yt:position>1</yt:position>
 			<yt:position>{{loop.index}}</yt:position>

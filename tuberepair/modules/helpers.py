@@ -14,6 +14,15 @@ valid_search_time = {
     'this_month': 'month'
 }
 
+# Time-range options for the classic app's "Most Viewed" tab (Today / This
+# Week / All Time). A value of None means "no date filter" (all time).
+valid_most_viewed_time = {
+    'today': 'today',
+    'this_week': 'week',
+    'all_time': None,
+    'all': None,
+}
+
 valid_search_duration = {
     'short': 'short',
     'long': 'long'

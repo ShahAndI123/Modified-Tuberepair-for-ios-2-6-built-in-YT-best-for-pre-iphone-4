@@ -1,0 +1,54 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<feed
+    xmlns='http://www.w3.org/2005/Atom'
+    xmlns:media='http://search.yahoo.com/mrss/'
+    xmlns:openSearch='http://a9.com/-/spec/opensearchrss/1.0/'
+    xmlns:gd='http://schemas.google.com/g/2005'
+    xmlns:yt='http://gdata.youtube.com/schemas/2007'>
+    <id>{{url}}/feeds/api/users/{{channel_id}}/subscriptions</id>
+    <updated>{{ unix(0) if not data else unix(data[0]['published']) }}</updated>
+    <category scheme='http://schemas.google.com/g/2005#kind' term='http://gdata.youtube.com/schemas/2007#subscription'/>
+    <title type='text'>Subscriptions</title>
+    <logo>http://www.youtube.com/img/pic_youtubelogo_123x63.gif</logo>
+    <link rel='related' type='application/atom+xml' href='{{url}}/feeds/api/users/{{channel_id}}'/>
+    <link rel='alternate' type='text/html' href='{{url}}/'/>
+    <link rel='http://schemas.google.com/g/2005#feed' type='application/atom+xml' href='{{url}}/feeds/api/users/{{channel_id}}/subscriptions'/>
+    <link rel='http://schemas.google.com/g/2005#batch' type='application/atom+xml' href='{{url}}/feeds/api/users/{{channel_id}}/subscriptions/batch'/>
+    <link rel='self' type='application/atom+xml' href='{{url}}/feeds/api/users/{{channel_id}}/subscriptions?start-index=1&amp;max-results=25'/>
+    <author>
+        <name>{{channel_id}}</name>
+        <uri>{{url}}/feeds/api/users/{{channel_id}}</uri>
+    </author>
+    <generator version='2.1' uri='{{url}}/'>TubeFixer API v2</generator>
+    <openSearch:totalResults>{{ data | length }}</openSearch:totalResults>
+    <openSearch:startIndex>1</openSearch:startIndex>
+    <openSearch:itemsPerPage>{{ data | length }}</openSearch:itemsPerPage>
+{% if data %}
+    {% for sub in data %}
+        <entry gd:etag='W/&quot;{{sub['subscriptionId']}}.&quot;'>
+            <id>tag:youtube.com,2008:user:{{channel_id}}:subscriptions:{{sub['subscriptionId']}}</id>
+            <published>{{ unix(sub['published']) }}</published>
+            <updated>{{ unix(sub['published']) }}</updated>
+            <category scheme='http://schemas.google.com/g/2005#kind' term='http://gdata.youtube.com/schemas/2007#subscription'/>
+            <category scheme='http://gdata.youtube.com/schemas/2007/subscriptiontypes.cat' term='channel'/>
+            <title type='text'>{{sub['title']}}</title>
+            <content type='text'>{{sub['title']}}</content>
+            <link rel='alternate' type='text/html' href="https://www.youtube.com/channel/{{sub['channelId']}}"/>
+            <link rel='self' type='application/atom+xml' href="{{url}}/feeds/api/users/{{channel_id}}/subscriptions/{{sub['subscriptionId']}}"/>
+            <link rel='edit' type='application/atom+xml' href="{{url}}/feeds/api/users/{{channel_id}}/subscriptions/{{sub['subscriptionId']}}"/>
+            <author>
+                <name>{{sub['author']}}</name>
+                <uri>{{url}}/feeds/api/users/{{sub['channelId']}}</uri>
+            </author>
+            <gd:feedLink rel='http://gdata.youtube.com/schemas/2007#user.uploads' href="{{url}}/feeds/api/users/{{sub['channelId']}}/uploads"/>
+            <media:group>
+                <media:thumbnail url="{{sub['thumbnail']}}" height='88' width='88' yt:name='default'/>
+                <media:description type='plain'>{{sub['description']}}</media:description>
+            </media:group>
+            <yt:username>{{sub['author']}}</yt:username>
+            <yt:subscriptionType>channel</yt:subscriptionType>
+        </entry>
+    {% endfor %}
+{% endif %}
+
+</feed>

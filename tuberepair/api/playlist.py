@@ -3,7 +3,7 @@ import config
 from modules import get, helpers
 from jinja2 import Environment, FileSystemLoader
 from api.login import extract_device_id, get_valid_access_token, get_logged_in_channel_id
-from api.video import normalize_video
+from api.video import normalize_video, get_channel_name_from_id
 import xml.etree.ElementTree as ET
 import requests
 import html
@@ -102,8 +102,16 @@ def playlists(channel_id, res=''):
         data = get.fetch(f"{config.URL}/api/v1/channels/{channel_id}/playlists{continuationToken}")
 
         if data:
+            playlists_clean = data.get('playlists', [])
+            for pl in playlists_clean:
+                author = str(pl.get("author") or "")
+                if author.startswith("UC") and len(author) > 15:
+                    resolved = get_channel_name_from_id(pl.get("authorId") or author)
+                    if resolved:
+                        pl["author"] = resolved
+
             return get.template('channel_playlists.jinja2',{
-                'data': data['playlists'],
+                'data': playlists_clean,
                 'continuation': 'continuation' in data and data['continuation'] or None,
                 'url': url,
                 'channel_id': channel_id
@@ -224,7 +232,8 @@ def playlists_video(playlist_id, res=''):
             'data': clean,
             'unix': get.unix,
             'url': url,
-            'next_page': next_page
+            'next_page': next_page,
+            'playlist_id': playlist_id
         })
     
     return get.error()

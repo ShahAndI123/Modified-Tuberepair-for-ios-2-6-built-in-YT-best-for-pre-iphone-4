@@ -46,7 +46,7 @@
 		<link rel='self' type='application/atom+xml' href='{{url}}/feeds/api/playlists/8E2186857EE27746/PLyl9mKRbpNIpJC5B8qpcgKX8v8NI62Jho?v=2'/>
 		<author>
 			<name>{{video['author']}}</name>
-			<uri>{{url}}/</uri>
+			<uri>{{url}}/feeds/api/users/{{video['authorId']}}</uri>
 			<yt:userId>{{video['authorId']}}</yt:userId>
 		</author>
 		<yt:accessControl action='comment' permission='allowed'/>
@@ -68,7 +68,7 @@
 			<media:category label='Howto &amp; Style' scheme='{{url}}/schemas/1970/categories.cat'>Howto</media:category>
 			<media:thumbnail url="http://i.ytimg.com/vi/{{video['videoId']}}/default.jpg" height="90" width="120"/>
 			<media:content url="{{url}}/getvideo/{{video['videoId']}}" type="video/3gpp" medium="video" isDefault="true" expression="full" duration="0" yt:format="1"/>
-			<media:credit role='uploader' scheme='urn:youtube' yt:display='{{video['author']}}' yt:type='partner'>{{video['authorId']}}</media:credit>
+			<media:credit role='uploader' scheme='urn:youtube' yt:display='{{video['author']}}' yt:type='partner'>{{video['author']}}</media:credit>
 			<media:description type='plain'>{{video['description']}}</media:description>
 			<media:keywords/>
 			<media:license type='text/html' href='http://www.youtube.com/t/terms'>youtube</media:license>
@@ -80,7 +80,7 @@
 		</media:group>
 		<gd:rating average='0' max='0' min='0' numRaters='0' rel='https://schemas.google.com/g/2005#overall'/>
 		<yt:recorded>1970-08-22</yt:recorded>
-		<yt:statistics favoriteCount='0' viewCount="{{video['viewCount']}}"/>
+		<yt:statistics favoriteCount='0' viewCount="{{ [video['viewCount'], 2147483647] | min }}"/>
 		<yt:rating numDislikes='0' numLikes='0'/>
 		<yt:position>1</yt:position>
 	</entry>

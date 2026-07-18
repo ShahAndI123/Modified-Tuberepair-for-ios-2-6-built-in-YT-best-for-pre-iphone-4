@@ -1,9 +1,7 @@
 <?xml version='1.0' encoding='UTF-8'?>
 <feed xmlns="http://www.w3.org/2005/Atom" xmlns:gd="http://schemas.google.com/g/2005" xmlns:openSearch="http://a9.com/-/spec/opensearch/1.1/" xmlns:yt="http://gdata.youtube.com/schemas/2007" xmlns:media="http://search.yahoo.com/mrss/" gd:etag="">
-  print("USING TEMPLATE: classic/search.jinja2", flush=True)
   <id>http://gdata.youtube.com/feeds/api/videos/</id>
   <category scheme="http://schemas.google.com/g/2005#kind" term="http://gdata.youtube.com/schemas/2007/#video" />
-<title>CLASSIC SEARCH TEST</title>
 <title>Videos matching:</title>  <logo>http://www.gstatic.com/youtube/img/logo.png</logo>
   <link rel="http://schemas.google.com/g/2005#feed" type="application/atom+xml" href="{{url}}/feeds/api/videos/" />
   <link rel="http://schemas.google.com/g/2005#batch" type="application/atom+xml" href="{{url}}/feeds/api/videos//batch" />
@@ -39,7 +37,7 @@
         <link rel="self" type="application/atom+xml" href="{{url}}/feeds/api/videos/{{info['videoId']}}" />
         <author>
           <name>{{info['author']}}</name>
-          <uri>{{url}}/feeds/api/users/{{info['authorId']}}/uploads</uri>
+          <uri>{{url}}/feeds/api/users/{{info['authorId']}}</uri>
           <yt:userId>{{info['authorId']}}</yt:userId>
         </author>
 
@@ -63,7 +61,7 @@
           <media:content url="{{url}}/getvideo/{{info['videoId']}}" type="video/3gpp" medium="video" expression="full" duration="{{info['lengthSeconds']}}" yt:format="2" />
           <media:content url="{{url}}/getvideo/{{info['videoId']}}" type="video/mp4" medium="video" expression="full" duration="{{info['lengthSeconds']}}" yt:format="8" />
           <media:content url="{{url}}/getvideo/{{info['videoId']}}" type="video/3gpp" medium="video" expression="full" duration="{{info['lengthSeconds']}}" yt:format="9" />
-          <media:credit role="uploader" scheme="urn:youtube" yt:display="{{info['author']}}">{{info['authorId']}}</media:credit>
+          <media:credit role="uploader" scheme="urn:youtube" yt:display="{{info['author']}}">{{info['author']}}</media:credit>
           <media:description type="plain">By {{info['author']}} - {{info['title']}}</media:description>
           <media:keywords></media:keywords>
           <media:license type="text/html" href="http://www.youtube.com/t/terms">youtube</media:license>

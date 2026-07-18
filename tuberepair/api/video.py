@@ -38,6 +38,49 @@ import subprocess
 import json
 import random
 import html
+
+_best_video_encoder = None
+_encoder_detection_lock = threading.Lock()
+
+def _detect_best_video_encoder():
+    """Runs once, caches the result. Tests hardware encoders against a
+    trivial 1-second dummy source instead of re-testing per real request,
+    and instead of restarting a fresh yt-dlp download for every fallback
+    attempt (which piping would otherwise require, since a failed
+    encoder partway through consumes/breaks the piped source data)."""
+    global _best_video_encoder
+
+    with _encoder_detection_lock:
+        if _best_video_encoder is not None:
+            return _best_video_encoder
+
+        candidates = [
+            ["-c:v", "h264_nvenc", "-preset", "p1", "-profile:v", "baseline"],
+            ["-c:v", "h264_qsv", "-preset", "veryfast", "-profile:v", "baseline"],
+        ]
+
+        for encoder_args in candidates:
+            test_output = f"_encoder_test_{encoder_args[1]}.mp4"
+            try:
+                subprocess.run([
+                    "ffmpeg", "-y",
+                    "-f", "lavfi", "-i", "testsrc=duration=1:size=320x240:rate=5",
+                    *encoder_args,
+                    "-t", "1",
+                    test_output
+                ], check=True, capture_output=True, timeout=15)
+                print("ENCODER DETECTION: found working hardware encoder:", encoder_args[1], flush=True)
+                _best_video_encoder = encoder_args
+                return _best_video_encoder
+            except Exception as e:
+                print("ENCODER DETECTION: not available:", encoder_args[1], flush=True)
+            finally:
+                if os.path.exists(test_output):
+                    os.remove(test_output)
+
+        print("ENCODER DETECTION: no hardware encoder available, using software libx264", flush=True)
+        _best_video_encoder = ["-c:v", "libx264", "-preset", "ultrafast", "-profile:v", "baseline"]
+        return _best_video_encoder
 import requests
 
 from datetime import datetime
@@ -116,36 +159,79 @@ def enrich_view_counts(items, max_workers=10):
         return items
 
     def _fetch(item):
-        try:
-            stats = get.fetch(
-                f"{config.URL}/api/v1/videos/{item['videoId']}"
-                f"?fields=type,viewCount,lengthSeconds,published,author,authorId"
-            )
-            if stats:
-                # the individual video endpoint's 'type' field is a more
-                # reliable live-stream signal than whatever flags the
-                # original list source did or didn't set — mark it so
-                # callers can filter it out even if it slipped past the
-                # earlier list-level check
-                if stats.get("type") == "livestream":
-                    item["_is_live"] = True
+        video_id = item.get("videoId")
 
-                if not item.get("viewCount"):
-                    item["viewCount"] = int(stats.get("viewCount") or 0)
-                if not item.get("lengthSeconds"):
-                    item["lengthSeconds"] = int(stats.get("lengthSeconds") or 0)
-                if not item.get("published"):
-                    item["published"] = int(stats.get("published") or 0)
-                if not item.get("author") or item.get("author") in ("Unknown", "unknown"):
-                    real_author = stats.get("author")
-                    if real_author:
+        # check the EXISTING persistent disk-backed cache first — this
+        # was already built for a different mechanism (fetch_ytdlp_metadata)
+        # but enrich_view_counts() never used it, meaning every single
+        # request re-fetched stats over the network even for videos seen
+        # minutes ago in a different feed. This is almost certainly the
+        # real cause of enrichment noticeably slowing things down.
+        cached = metadata_cache.get(video_id) if video_id else None
+        cache_is_fresh = cached and (time.time() - cached.get("cachedAt", 0)) < 21600  # 6 hours
+
+        if cache_is_fresh:
+            if not item.get("viewCount"):
+                item["viewCount"] = cached.get("viewCount", 0)
+            if not item.get("lengthSeconds"):
+                item["lengthSeconds"] = cached.get("lengthSeconds", 0)
+            if not item.get("published"):
+                item["published"] = cached.get("published", 0)
+            if cached.get("author") and (not item.get("author") or item.get("author") in ("Unknown", "unknown") or _looks_like_raw_id(item)):
+                item["author"] = cached["author"]
+            if cached.get("authorId") and (not item.get("authorId") or item.get("authorId") == "unknown"):
+                item["authorId"] = cached["authorId"]
+            if cached.get("isLive"):
+                item["_is_live"] = True
+        else:
+            try:
+                # NOTE: this Invidious instance silently returns nothing when
+                # given a multi-field comma-separated `fields=` parameter —
+                # confirmed via a raw log capture. That's been the real cause
+                # of enrichment quietly failing with zero errors this whole
+                # time (no exception was ever thrown, `stats` was just empty).
+                # Fetching the full object instead of a partial projection
+                # actually works.
+                stats = get.fetch(f"{config.URL}/api/v1/videos/{video_id}")
+                if not stats:
+                    print("STATS ENRICH: empty response for", video_id, flush=True)
+                if stats:
+                    is_live = stats.get("type") == "livestream"
+                    if is_live:
+                        item["_is_live"] = True
+
+                    view_count = int(stats.get("viewCount") or 0)
+                    length_seconds = int(stats.get("lengthSeconds") or 0)
+                    published = int(stats.get("published") or 0)
+                    real_author = stats.get("author") or ""
+                    real_author_id = stats.get("authorId") or ""
+
+                    if not item.get("viewCount"):
+                        item["viewCount"] = view_count
+                    if not item.get("lengthSeconds"):
+                        item["lengthSeconds"] = length_seconds
+                    if not item.get("published"):
+                        item["published"] = published
+                    if real_author and (not item.get("author") or item.get("author") in ("Unknown", "unknown") or _looks_like_raw_id(item)):
                         item["author"] = html.escape(str(real_author))
-                if not item.get("authorId") or item.get("authorId") == "unknown":
-                    real_author_id = stats.get("authorId")
-                    if real_author_id:
+                    if real_author_id and (not item.get("authorId") or item.get("authorId") == "unknown"):
                         item["authorId"] = str(real_author_id)
-        except Exception as e:
-            print("STATS ENRICH FAILED:", item.get("videoId"), e, flush=True)
+
+                    # write through to the persistent cache so every
+                    # OTHER feed that ever shows this same video gets an
+                    # instant cache hit instead of another network call
+                    if video_id:
+                        metadata_cache[video_id] = {
+                            "viewCount": view_count,
+                            "lengthSeconds": length_seconds,
+                            "published": published,
+                            "author": real_author,
+                            "authorId": real_author_id,
+                            "isLive": is_live,
+                            "cachedAt": int(time.time()),
+                        }
+            except Exception as e:
+                print("STATS ENRICH FAILED:", video_id, e, flush=True)
 
         # last resort: if we still don't have a readable name but do have
         # a real channel ID, resolve it directly via the channel endpoint
@@ -173,6 +259,8 @@ def enrich_view_counts(items, max_workers=10):
         futures = [executor.submit(_fetch, item) for item in to_fetch]
         for future in as_completed(futures):
             future.result()
+
+    save_metadata_cache()
 
     return items
 
@@ -339,22 +427,33 @@ def normalize_video(vid):
     ]:
         return None
 
+    raw_author = str(
+        vid.get("author")
+        or vid.get("uploader")
+        or vid.get("channel")
+        or "Unknown"
+    )
+    author_id = str(
+        vid.get("authorId")
+        or vid.get("uploader_id")
+        or vid.get("channel_id")
+        or get_channel_id_from_name(vid.get("author") or vid.get("uploader") or vid.get("channel"))
+        or "unknown"
+    )
+
+    # Some sources (yt-dlp, certain Invidious responses) hand back the raw
+    # "UC..." channel ID as the author string instead of the readable name.
+    # Resolve it to a real name here so it never reaches a template.
+    if raw_author.startswith("UC") and len(raw_author) > 15:
+        resolved_name = get_channel_name_from_id(author_id if author_id != "unknown" else raw_author)
+        if resolved_name:
+            raw_author = resolved_name
+
     return {
         "title": html.escape(str(title)),
         "videoId": str(video_id),
-        "author": html.escape(str(
-            vid.get("author")
-            or vid.get("uploader")
-            or vid.get("channel")
-            or "Unknown"
-        )),
-        "authorId": str(
-            vid.get("authorId")
-            or vid.get("uploader_id")
-            or vid.get("channel_id")
-            or get_channel_id_from_name(vid.get("author") or vid.get("uploader") or vid.get("channel"))
-            or "unknown"
-        ),
+        "author": html.escape(raw_author),
+        "authorId": author_id,
         "viewCount": safe_int(
             vid.get("viewCount")
             or vid.get("view_count")
@@ -369,8 +468,6 @@ def normalize_video(vid):
 
     print("RELATED VIDEO KEYS:", vid.keys())
 
-@video.route("/feeds/api/users/<channel>")
-@video.route("/feeds/api/users/<channel>/")
 @video.route("/feeds/api/users/<channel>/uploads")
 @video.route("/feeds/api/users/<channel>/playlists")
 def channel_uploads(channel):
@@ -491,8 +588,8 @@ def subscriptions_list(channel):
     access_token = get_valid_access_token(device_id)
 
     url = request.url_root.rstrip("/")
-    empty = get.template("uploads.jinja2", {
-        "data": [], "unix": get.unix, "url": url, "continuation": None,
+    empty = get.template("subscriptions.jinja2", {
+        "data": [], "unix": get.unix, "url": url, "channel_id": channel,
     })
 
     if not access_token:
@@ -519,23 +616,63 @@ def subscriptions_list(channel):
         snippet = it.get("snippet", {})
         sub_id = it.get("id")
         channel_id = snippet.get("resourceId", {}).get("channelId", "unknown")
+        thumbs = snippet.get("thumbnails", {})
+        thumb_url = (
+            thumbs.get("high", {}).get("url")
+            or thumbs.get("default", {}).get("url")
+            or ""
+        )
         clean.append({
             "title": html.escape(snippet.get("title", "Untitled")),
-            "videoId": sub_id,  # not a real video — used as the entry's unique id in the template
+            "subscriptionId": sub_id,
+            "channelId": channel_id,
             "author": html.escape(snippet.get("title", "Unknown")),
             "authorId": channel_id,
-            "viewCount": 0,
-            "lengthSeconds": 0,
-            "published": 0,
-            "description": html.escape(snippet.get("description", "")[:120]),
+            "thumbnail": thumb_url,
+            "description": html.escape(snippet.get("description", "")[:500]),
+            "published": safe_published(snippet.get("publishedAt")),
         })
 
-    return get.template("uploads.jinja2", {
+    return get.template("subscriptions.jinja2", {
         "data": clean,
         "unix": get.unix,
         "url": url,
-        "continuation": None,
+        "channel_id": channel,
     })
+
+@video.route("/feeds/api/users/<channel>/subscriptions/<subscription_id>", methods=["GET"])
+def subscription_entry(channel, subscription_id):
+    """Tapping a subscription in the list may hit this entry's own
+    <link rel='self'>/<link rel='edit'> URL rather than following the
+    gd:feedLink to the channel's /uploads feed. Resolve the subscription
+    ID straight to its channel via the Data API's id= filter (cheaper
+    than re-listing every subscription) and just serve that channel's
+    uploads feed here directly, so either way of navigating in works."""
+    device_id = extract_device_id(request)
+    access_token = get_valid_access_token(device_id)
+    if not access_token:
+        return get.error()
+
+    try:
+        r = requests.get(
+            "https://www.googleapis.com/youtube/v3/subscriptions",
+            params={"part": "snippet", "id": subscription_id},
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10,
+        )
+        print("SUBSCRIPTION ENTRY status:", r.status_code, flush=True)
+        items = r.json().get("items", []) if r.ok else []
+        if not items:
+            print("SUBSCRIPTION ENTRY: no matching subscription for", subscription_id, flush=True)
+            return get.error()
+        channel_id = items[0].get("snippet", {}).get("resourceId", {}).get("channelId")
+        if not channel_id:
+            return get.error()
+    except Exception as e:
+        print("SUBSCRIPTION ENTRY ERROR:", repr(e), flush=True)
+        return get.error()
+
+    return channel_uploads(channel_id)
 
 @video.route("/feeds/api/users/<channel>/subscriptions/<subscription_id>", methods=["DELETE"])
 def unsubscribe(channel, subscription_id):
@@ -838,7 +975,15 @@ def personalized_feed_stub(channel):
         access_token = get_valid_access_token(device_id)
         if access_token:
             try:
-                data = fetch_personal_feed(access_token, browse_id, limit=15)
+                # newsubscriptionvideos in particular needs a much bigger
+                # pool than 15 — if the app is filtering this same fetched
+                # list client-side per channel (rather than making a fresh
+                # request when you tap a subscription), then with dozens of
+                # subscribed channels, 15 total videos means most channels
+                # won't have a single video represented and will show as
+                # "no videos" even though nothing is actually broken.
+                fetch_limit = 60 if feed_name == "newsubscriptionvideos" else 15
+                data = fetch_personal_feed(access_token, browse_id, limit=fetch_limit)
                 data = enrich_view_counts(data)
             except Exception as e:
                 print("PERSONALIZED FEED ERROR:", feed_name, e, flush=True)
@@ -904,6 +1049,69 @@ def get_playlist_from_invidious(playlist_id):
     except Exception as e:
         print("INVIDIOUS PLAYLIST FAILED:", e)
         return []
+
+# InviData (github.com/StealthTheAngryBird/InviData) — a similar
+# GData-translation project — uses Invidious's SEARCH endpoint with a
+# generic query for Featured/Top Rated/etc, taking author/authorId
+# directly from search results with just a simple fallback, no
+# enrichment logic at all. That only works if search results are
+# reliably complete — which they appear to be, unlike the curated
+# PLAYLIST endpoint we were using, which seems to have much less
+# reliable author/authorId completeness. This is a structural fix
+# rather than another enrichment patch.
+FEED_SEARCH_QUERIES = {
+    "top_rated": "top rated videos",
+    "most_viewed": "most viewed videos",
+    "recently_featured": "trending videos",
+    "most_popular": "popular videos",
+    "most_discussed": "most discussed videos",
+    "on_the_web": "viral videos",
+}
+
+def get_videos_via_search(query, limit=15, sort_by=None, date=None):
+    url = f"{config.URL}/api/v1/search?q={query}&type=video"
+    if sort_by:
+        url += f"&sort_by={sort_by}"
+    if date:
+        url += f"&date={date}"
+    data = get.fetch(url)
+    if not data:
+        return []
+
+    clean = []
+    seen = set()
+
+    for item in data:
+        if item.get("type") != "video":
+            continue
+        vid_id = item.get("videoId")
+        if not vid_id or vid_id in seen:
+            continue
+        if item.get("liveNow") or item.get("isLive") or item.get("isUpcoming"):
+            continue
+        seen.add(vid_id)
+
+        author_name = item.get("author") or "YouTube"
+        author_id = item.get("authorId")
+        if not author_id:
+            author_id = get_channel_id_from_name(author_name)
+
+        clean.append({
+            "title": html.escape(item.get("title") or "Untitled"),
+            "videoId": vid_id,
+            "author": html.escape(author_name),
+            "authorId": author_id or "unknown",
+            "viewCount": int(item.get("viewCount") or 0),
+            "lengthSeconds": int(item.get("lengthSeconds") or 0),
+            "published": int(item.get("published") or 0),
+            "description": html.escape((item.get("description") or "")[:120]),
+        })
+
+        if len(clean) >= limit:
+            break
+
+    random.shuffle(clean)
+    return clean
 
 def get_featured_from_hourly_playlists():
 
@@ -997,6 +1205,85 @@ def get_featured_from_hourly_playlists():
 
 channel_id_cache = {}
 channel_name_cache = {}
+
+@video.route("/feeds/api/users/<channel>")
+@video.route("/feeds/api/users/<channel>/")
+def channel_profile(channel):
+    """Channel PROFILE endpoint — a single entry with the channel's real
+    display name, subscriber count, etc. This is architecturally
+    different from the uploads/videos feed, and was missing entirely;
+    this exact bare URL was previously claimed by channel_uploads(),
+    which returned a full video-list feed instead of a profile entry.
+    If the app resolves a channel's display name via a separate request
+    to this URL (standard GData behavior, confirmed by a similar project,
+    github.com/StealthTheAngryBird/InviData), that would explain why
+    fixing the video-level 'author' field never mattered — it was
+    getting the wrong response shape here and falling back to the ID."""
+    channel_id = channel
+    channel_name = channel
+    sub_count = 0
+    video_count = 10
+    view_count = 0
+    description = "YouTube Channel"
+
+    print("CHANNEL_PROFILE requested for:", channel, flush=True)
+
+    if channel_id in ("unknown", "Unknown", ""):
+        # this means whatever built the video's link never had a real
+        # channel ID to begin with (our own internal placeholder leaked
+        # through into a real request) — nothing to resolve here.
+        print("CHANNEL_PROFILE: got literal placeholder 'unknown', nothing to resolve", flush=True)
+        channel_name = "Unknown Channel"
+    else:
+        if not channel_id.startswith("UC"):
+            resolved = get_channel_id_from_name(channel_id)
+            print("CHANNEL_PROFILE: resolved name->id:", channel_id, "->", resolved, flush=True)
+            if resolved and resolved != "unknown":
+                channel_id = resolved
+
+        if channel_id.startswith("UC"):
+            try:
+                data = get.fetch(f"{config.URL}/api/v1/channels/{channel_id}")
+                print("CHANNEL_PROFILE: fetch result for", channel_id, "->", bool(data), flush=True)
+                if data and data.get("author"):
+                    channel_name = data["author"]
+                    sub_count = int(data.get("subCount") or 0)
+                    description = data.get("description") or description
+                    video_count = int(data.get("videoCount") or video_count)
+                    view_count = int(data.get("totalViews") or 0)
+                else:
+                    print("CHANNEL_PROFILE: fetch returned no usable 'author' for", channel_id, flush=True)
+            except Exception as e:
+                print("CHANNEL PROFILE FETCH ERROR:", channel_id, e, flush=True)
+
+    url = request.url_root.rstrip("/")
+
+    return Response(
+        "<?xml version='1.0' encoding='UTF-8'?>"
+        "<entry xmlns='http://www.w3.org/2005/Atom' xmlns:media='http://search.yahoo.com/mrss/' "
+        "xmlns:gd='http://schemas.google.com/g/2005' xmlns:yt='http://gdata.youtube.com/schemas/2007'>"
+        f"<id>{url}/feeds/api/users/{html.escape(channel_id)}</id>"
+        "<published>2005-04-15T00:00:00.000Z</published>"
+        "<updated>2026-01-01T00:00:00.000Z</updated>"
+        "<category scheme='http://schemas.google.com/g/2005#kind' term='http://gdata.youtube.com/schemas/2007#userProfile'/>"
+        f"<title type='text'>{html.escape(channel_name)}</title>"
+        f"<content type='text'>{html.escape(description)}</content>"
+        f"<link rel='alternate' type='text/html' href='https://www.youtube.com/channel/{html.escape(channel_id)}'/>"
+        f"<link rel='self' type='application/atom+xml' href='{url}/feeds/api/users/{html.escape(channel_id)}?v=2'/>"
+        "<author>"
+        f"<name>{html.escape(channel_name)}</name>"
+        f"<uri>{url}/feeds/api/users/{html.escape(channel_id)}</uri>"
+        "</author>"
+        f"<gd:feedLink rel='http://gdata.youtube.com/schemas/2007#user.uploads' href='{url}/feeds/api/users/{html.escape(channel_id)}/uploads' countHint='{video_count}'/>"
+        f"<gd:feedLink rel='http://gdata.youtube.com/schemas/2007#user.playlists' href='{url}/feeds/api/users/{html.escape(channel_id)}/playlists'/>"
+        f"<gd:feedLink rel='http://gdata.youtube.com/schemas/2007#user.subscriptions' href='{url}/feeds/api/users/{html.escape(channel_id)}/subscriptions' countHint='0'/>"
+        f"<gd:feedLink rel='http://gdata.youtube.com/schemas/2007#user.newsubscriptionvideos' href='{url}/feeds/api/users/{html.escape(channel_id)}/newsubscriptionvideos'/>"
+        "<yt:maxUploadDuration seconds='0'/>"
+        f"<yt:statistics lastWebAccess='1970-01-01T00:00:00.000Z' subscriberCount='{sub_count}' videoWatchCount='0' viewCount='{view_count}' totalUploadViews='{view_count}'/>"
+        f"<yt:username display='{html.escape(channel_name)}'>{html.escape(channel_id)}</yt:username>"
+        "</entry>",
+        mimetype="application/atom+xml"
+    )
 
 def get_channel_name_from_id(channel_id):
     """Reverse of get_channel_id_from_name — resolves a real channel name
@@ -1113,12 +1400,42 @@ def frontpage(regioncode="US", popular=None, res=''):
     # fetch api from invidious
     import subprocess, json
 
-    search_query = "popular videos"
+    search_query = FEED_SEARCH_QUERIES.get(popular, "trending videos")
 
     if popular == "most_viewed":
-        data = get_most_viewed_from_playlist()
+        # "most viewed videos" as a literal search phrase just matches
+        # titles containing that text, not genuinely popular content.
+        # A broad query combined with real view-count sorting gets
+        # actual highly-viewed videos instead.
+        #
+        # The classic app's Most Viewed tab lets you pick a time range
+        # (Today / This Week / All Time), sent as ?time=today|this_week|all_time.
+        # Map that onto Invidious's own `date` search filter.
+        time_param = request.args.get('time', 'all_time')
+        date_filter = helpers.valid_most_viewed_time.get(time_param)
+        print("MOST VIEWED TIME FILTER:", time_param, "->", date_filter, flush=True)
+        data = get_videos_via_search("official", sort_by="view_count", date=date_filter)
+    elif popular == "top_rated":
+        # Same Today / This Week / All Time selector as Most Viewed,
+        # applied to Top Rated's own rating-based sort.
+        time_param = request.args.get('time', 'all_time')
+        date_filter = helpers.valid_most_viewed_time.get(time_param)
+        print("TOP RATED TIME FILTER:", time_param, "->", date_filter, flush=True)
+        data = get_videos_via_search("official", sort_by="rating", date=date_filter)
     else:
-        data = get_featured_from_hourly_playlists()
+        data = get_videos_via_search(search_query)
+
+    if popular == "most_viewed" and data:
+        filtered = [item for item in data if item.get("viewCount", 0) < 1_500_000_000]
+        if filtered:
+            data = filtered
+
+    if not data:
+        print("SEARCH-BASED FEED EMPTY, FALLING BACK TO PLAYLIST-BASED APPROACH", flush=True)
+        if popular == "most_viewed":
+            data = get_most_viewed_from_playlist()
+        else:
+            data = get_featured_from_hourly_playlists()
     
     print("POPULAR:", popular)
     print("QUERY:", search_query)
@@ -1130,16 +1447,7 @@ def frontpage(regioncode="US", popular=None, res=''):
     now = time.time()
     cache_key = f"{popular}_{regioncode}"
 
-    now = time.time()
-    cache_key = f"{popular}_{regioncode}"
-
     print("FEATURED RELOAD (no whole-feed cache):", cache_key)
-
-    if popular == "most_viewed":
-        data = get_most_viewed_from_playlist()
-    else:
-        data = get_featured_from_hourly_playlists()
-
     print("FEATURED COUNT:", len(data))
 
     # Will be used for checking Classic
@@ -1149,32 +1457,33 @@ def frontpage(regioncode="US", popular=None, res=''):
     if url[-1] == '/':
         url = url[:-1]
 
-        if data:
+    if data:
 
-            prompt = build_login_prompt(request)
-            if prompt:
-                data = [prompt] + data
+        prompt = build_login_prompt(request)
+        if prompt:
+            data = [prompt] + data
 
-            if config.SPYING == True:
-                print_with_seperator("Region code: " + regioncode)
+        if config.SPYING == True:
+            print_with_seperator("Region code: " + regioncode)
 
-            display_data = data[:]
-            random.shuffle(display_data)
+        display_data = data[:]
+        random.shuffle(display_data)
 
-            if "youtube/1.0.0" in user_agent or "youtube v1.0.0" in user_agent:
-                return get.template('classic/featured.jinja2',{
-                    'data': display_data[:15],
-                    'unix': get.unix,
-                    'url': url
-                })
-
-            return get.template('featured.jinja2',{
+        if "youtube/1.0.0" in user_agent or "youtube v1.0.0" in user_agent:
+            return get.template('classic/featured.jinja2',{
                 'data': display_data[:15],
                 'unix': get.unix,
                 'url': url
             })
 
-        return get.error()
+        return get.template('featured.jinja2',{
+            'data': display_data[:15],
+            'unix': get.unix,
+            'url': url
+        })
+
+    print("FRONTPAGE: data came back empty for", cache_key, flush=True)
+    return get.error()
 
 def get_most_viewed_from_playlist():
     playlist_id = "PLD8WkaWYGIio"
@@ -1233,6 +1542,21 @@ def get_most_viewed_from_playlist():
     random.shuffle(data)
     data = data[:15]
     data = enrich_view_counts(data)
+
+    # keep this in the "millions" range rather than "viral mega-hit"
+    # territory — besides just being more varied/interesting, videos
+    # with multi-billion view counts cluster right up against (or over)
+    # the 32-bit signed int cap this old app's own view-count field can
+    # hold, which is why numbers looked suspiciously close to the limit.
+    # BUT don't let this filter empty the list entirely — an empty
+    # result makes frontpage() treat the whole request as failed (404),
+    # which is worse than showing a few mega-viral videos.
+    filtered = [item for item in data if item.get("viewCount", 0) < 1_500_000_000]
+    if filtered:
+        data = filtered
+    else:
+        print("MOST VIEWED: under-1B filter would empty the list, keeping unfiltered", flush=True)
+
     return data
 
 @video.route("/feeds/api/most_viewed")
@@ -1255,6 +1579,53 @@ def most_viewed(res=''):
     now = time.time()
 
     print("MOST VIEWED RELOAD (no whole-feed cache)")
+
+    # Same Today / This Week / All Time selector as the standardfeeds
+    # Most Viewed tab: ?time=today|this_week|all_time
+    time_param = request.args.get('time', 'all_time')
+    date_filter = helpers.valid_most_viewed_time.get(time_param)
+    print("MOST VIEWED TIME FILTER:", time_param, "->", date_filter, flush=True)
+
+    # Real view-count-sorted search (optionally scoped to a date range)
+    # instead of a fixed "viral trending popular videos" guess — that
+    # phrase just matched titles containing those words, not videos
+    # that were actually most-viewed.
+    data = get_videos_via_search("official", sort_by="view_count", date=date_filter)
+    filtered = [item for item in data if item.get("viewCount", 0) < 1_500_000_000]
+    if filtered:
+        data = filtered
+
+    if data:
+        data = enrich_view_counts(data)
+
+        if url[-1] == '/':
+            url = url[:-1]
+
+        print("MOST VIEWED COUNT:", len(data))
+
+        prompt = build_login_prompt(request)
+        if prompt:
+            data = [prompt] + data
+
+        user_agent = request.headers.get('User-Agent', '').lower()
+
+        offset = int(time.time()) % len(data) if data else 0
+        data = data[offset:] + data[:offset]
+
+        if "youtube/1.0.0" in user_agent or "youtube v1.0.0" in user_agent:
+            return get.template('classic/featured.jinja2', {
+                'data': data[:15],
+                'unix': get.unix,
+                'url': url
+            })
+
+        return get.template('featured.jinja2', {
+            'data': data[:15],
+            'unix': get.unix,
+            'url': url
+        })
+
+    print("MOST VIEWED: search-based fetch empty, falling back to yt-dlp", flush=True)
 
     result = subprocess.run(
         ["yt-dlp", "ytsearch15:viral trending popular videos", "--dump-json", "--no-playlist"],
@@ -1312,6 +1683,11 @@ def most_viewed(res=''):
             print("MOST VIEWED ERROR:", e)
 
     data = enrich_view_counts(data)
+    filtered = [item for item in data if item.get("viewCount", 0) < 1_500_000_000]
+    if filtered:
+        data = filtered
+    else:
+        print("MOST VIEWED (yt-dlp route): under-1B filter would empty the list, keeping unfiltered", flush=True)
 
     if url[-1] == '/':
         url = url[:-1]
@@ -1457,24 +1833,86 @@ def search_videos(res=''):
     if not search_keyword:
         # "Most Recent" tab: the classic app calls this same endpoint with
         # no q=, just orderby=updated, expecting a general recent-videos
-        # feed rather than a search. General /trending mixes in live
-        # streams, sports, and news broadcasts — at some times of day
-        # that's ALL it returns, which is why this looked broken even
-        # though the live-filter was working correctly. Using search with
-        # type=video excludes live/upcoming content at the source instead
-        # of relying on filtering after the fact.
-        data = get.fetch(
-            f"{config.URL}/api/v1/search"
-            f"?q=*&type=video&sort_by=upload_date&region=US"
+        # feed rather than a search. Reverted back to this search-based
+        # approach per feedback — trending had other tradeoffs that were
+        # worse than this one's stale dates.
+        #
+        # sort_by=upload_date alone isn't reliably honored against a
+        # wildcard q=* on this instance — it still surfaces videos from
+        # 2020/2021 etc. Layering Invidious's own date= recency filter on
+        # top forces genuinely-recent (current-year) results.
+        #
+        # A narrow window (e.g. "week") can come back with only a couple
+        # of items on this instance — accepting that outright leaves the
+        # tab looking half-empty. On top of that, a single "q=*" wildcard
+        # search is itself too sparse on this instance (date=month has
+        # come back completely empty every time, and week/year each only
+        # turn up a couple of items) — so cross several different broad,
+        # generic terms with each date window and merge everything
+        # together (deduped by videoId), rather than relying on one
+        # query to carry the whole feed.
+        #
+        # Deliberately NOT falling back to an unfiltered search: that
+        # reliably surfaced 2020-2022 videos on this instance, worse than
+        # a shorter but genuinely recent list. RECENCY_CUTOFF_DAYS below
+        # is a hard safety net on top of this either way, in case a
+        # "recent" window's date filter isn't actually enforced
+        # server-side for some queries.
+        MIN_DESIRED = 15
+        RECENCY_CUTOFF_DAYS = 90
+        GENERIC_QUERIES = ("*", "official", "new", "2026", "live", "vlog", "music", "gameplay")
+        data = []
+        seen_ids = set()
+        for date_filter in ("week", "month", "year"):
+            date_qs = f"&date={date_filter}"
+
+            def _fetch_query(q):
+                return q, get.fetch(
+                    f"{config.URL}/api/v1/search"
+                    f"?q={q}&type=video&sort_by=upload_date&region=US{date_qs}"
+                ) or []
+
+            with ThreadPoolExecutor(max_workers=len(GENERIC_QUERIES)) as executor:
+                results = list(executor.map(_fetch_query, GENERIC_QUERIES))
+
+            for q, batch in results:
+                new_count = 0
+                for item in batch:
+                    vid_id = item.get("videoId") or item.get("id")
+                    if vid_id and vid_id not in seen_ids:
+                        seen_ids.add(vid_id)
+                        data.append(item)
+                        new_count += 1
+                print(
+                    "MOST RECENT: date filter", date_filter, "query", repr(q),
+                    "->", len(batch), "raw items,", new_count, "new,",
+                    len(data), "total so far", flush=True
+                )
+            if len(data) >= MIN_DESIRED:
+                break
+        if not data:
+            return get.error()
+
+        # Hard safety net: drop anything older than RECENCY_CUTOFF_DAYS
+        # regardless of which date-filter tier it came from, since the
+        # date filter itself isn't fully trustworthy on this instance.
+        cutoff_ts = time.time() - (RECENCY_CUTOFF_DAYS * 86400)
+        before_cutoff_count = len(data)
+        data = [
+            item for item in data
+            if safe_published(item.get("published") or item.get("publishedText")) >= cutoff_ts
+        ]
+        print(
+            "MOST RECENT: recency cutoff dropped",
+            before_cutoff_count - len(data), "of", before_cutoff_count,
+            "items older than", RECENCY_CUTOFF_DAYS, "days", flush=True
         )
-        print("MOST RECENT: search fetch returned", len(data) if data else 0, "raw items", flush=True)
         if not data:
             return get.error()
 
         clean = []
         for vid in data:
-            # still filter defensively in case a live/upcoming item
-            # slips through the type=video search anyway
+            # classic YouTube can't play live streams — skip them
             if vid.get("type") == "livestream" or vid.get("liveNow") or vid.get("isLive") or vid.get("isUpcoming"):
                 continue
             item = normalize_video(vid)
@@ -1532,9 +1970,9 @@ def search_videos(res=''):
 
     # If we have time, turn it into invidious friendly parameters
     # Else ignore it
-    time = request.args.get('time')
-    if time in helpers.valid_search_time:
-        query += f'&date={helpers.valid_search_time[time]}'
+    time_param = request.args.get('time')
+    if time_param in helpers.valid_search_time:
+        query += f'&date={helpers.valid_search_time[time_param]}'
 
     # If we have duration, turn it into invidious friendly parameters
     # Else ignore it
@@ -1690,6 +2128,67 @@ def search_videos(res=''):
 
 # video's comments
 # IDEA: filter the comments too?
+@video.route("/api/videos/<videoid>/comments", methods=["POST"])
+@video.route("/<int:res>/api/videos/<videoid>/comments", methods=["POST"])
+@video.route("/feeds/api/videos/<videoid>/comments", methods=["POST"])
+@video.route("/<int:res>/feeds/api/videos/<videoid>/comments", methods=["POST"])
+def post_comment(videoid, res=''):
+    """Post a comment, backed by YouTube Data API v3's
+    commentThreads.insert. The app POSTs a body like:
+        <entry ...><content>the comment text</content></entry>"""
+    device_id = extract_device_id(request)
+    access_token = get_valid_access_token(device_id)
+    if not access_token:
+        return get.error()
+
+    try:
+        body = request.get_data(as_text=True)
+        root = ET.fromstring(body)
+    except Exception as e:
+        print("POST_COMMENT PARSE ERROR:", e, flush=True)
+        return get.error()
+
+    ns = {"atom": "http://www.w3.org/2005/Atom"}
+    content_el = root.find("atom:content", ns)
+    if content_el is None:
+        content_el = root.find("content")
+
+    comment_text = content_el.text.strip() if content_el is not None and content_el.text else None
+    if not comment_text:
+        print("POST_COMMENT: no comment text found in body", flush=True)
+        return get.error()
+
+    try:
+        r = requests.post(
+            "https://www.googleapis.com/youtube/v3/commentThreads",
+            params={"part": "snippet"},
+            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+            json={
+                "snippet": {
+                    "videoId": videoid,
+                    "topLevelComment": {
+                        "snippet": {"textOriginal": comment_text}
+                    }
+                }
+            },
+            timeout=10,
+        )
+        print("POST_COMMENT status:", r.status_code, flush=True)
+        if not r.ok:
+            print("POST_COMMENT body:", r.text[:400], flush=True)
+            return get.error()
+    except Exception as e:
+        print("POST_COMMENT ERROR:", repr(e), flush=True)
+        return get.error()
+
+    return Response(
+        "<?xml version='1.0' encoding='UTF-8'?>"
+        "<entry xmlns='http://www.w3.org/2005/Atom' xmlns:yt='http://gdata.youtube.com/schemas/2007'>"
+        f"<content>{html.escape(comment_text)}</content>"
+        "</entry>",
+        mimetype="application/atom+xml"
+    )
+
 @video.route("/api/videos/<videoid>/comments")
 @video.route("/<int:res>/api/videos/<videoid>/comments")
 @video.route("/feeds/api/videos/<videoid>/comments")
@@ -1815,63 +2314,173 @@ def getvideo(video_id, res=None):
         temp_input = f"temp_{video_id}.mp4"
         temp_output = f"static/{video_id}.mp4"
 
-        # Download
-        # Download
-        try:
-            print("TRYING NORMAL YT-DLP")
+        best_encoder = _detect_best_video_encoder()
 
-            subprocess.run([
-                "yt-dlp",
-                "--extractor-args", "youtube:player_client=android",
-                "-f", "18/36/17",
-                "--no-playlist",
-                "--no-warnings",
-                "-o", temp_input,
-                url
-            ],
-            check=True)
-
-        except subprocess.CalledProcessError as e:
-
-            print("NORMAL FAILED, TRYING ANDROID")
-
-            subprocess.run([
-                "yt-dlp",
-                "--extractor-args", "youtube:player_client=android",
-                "-f", "18/36/17",
-                "--no-playlist",
-                "--no-warnings",
-                "-o", temp_input,
-                url
-            ],
-            check=True)
-
-        print("START FFMPEG")
+        piped_success = False
         t2 = time.time()
-        
-        # Convert (iPhone 3G safe)
-        subprocess.run([
-            "ffmpeg",
-            "-i", temp_input,
-            "-vf", "scale=320:240",
-            "-c:v", "libx264",
-            "-profile:v", "baseline",
-            "-level", "3.0",
-            "-pix_fmt", "yuv420p",
 
-            "-c:a", "aac",
-            "-profile:a", "aac_low",
-            "-b:a", "96k",
-            "-ar", "44100",
-            "-ac", "2",
+        # -------- Try piping yt-dlp directly into ffmpeg --------
+        # The previous approach downloaded the source to disk, then had
+        # ffmpeg read it back — a full write+read of the same data for
+        # nothing. Piping yt-dlp's stdout straight into ffmpeg's stdin
+        # removes that entire round trip. This does NOT attempt true
+        # progressive playback during encoding (the output container is
+        # still a full +faststart mp4, unchanged) — just gets to that
+        # same finished file faster. Falls back completely to the
+        # original disk-based method if piping fails for any reason
+        # (some videos/formats don't pipe cleanly).
+        try:
+            print("TRYING PIPED YT-DLP -> FFMPEG", flush=True)
 
-            "-fflags", "+genpts",
-            "-movflags", "+faststart",
+            ytdlp_proc = subprocess.Popen([
+                "yt-dlp",
+                "--extractor-args", "youtube:player_client=android",
+                "-f", "18/36/17",
+                "--no-playlist",
+                "--no-warnings",
+                "-o", "-",
+                url
+            ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
-            temp_output
-        ], check=True)
+            ffmpeg_proc = subprocess.Popen([
+                "ffmpeg", "-y",
+                "-i", "pipe:0",
+                "-vf", "scale=320:240",
+                *best_encoder,
+                "-level", "3.0",
+                "-pix_fmt", "yuv420p",
 
-        print("FFMPEG SECONDS:", time.time() - t2)
+                "-c:a", "aac",
+                "-profile:a", "aac_low",
+                "-b:a", "96k",
+                "-ar", "44100",
+                "-ac", "2",
+
+                "-fflags", "+genpts",
+                "-movflags", "+faststart",
+
+                temp_output
+            ], stdin=ytdlp_proc.stdout, stderr=subprocess.PIPE)
+
+            ytdlp_proc.stdout.close()  # let ffmpeg own the read end
+            _, ffmpeg_err = ffmpeg_proc.communicate(timeout=120)
+            ytdlp_proc.wait(timeout=5)
+
+            if (
+                ffmpeg_proc.returncode == 0
+                and os.path.exists(temp_output)
+                and os.path.getsize(temp_output) > 0
+            ):
+                piped_success = True
+                print("PIPED PIPELINE SUCCEEDED in", time.time() - t2, "seconds", flush=True)
+            else:
+                print("PIPED PIPELINE FAILED:", ffmpeg_err[-400:] if ffmpeg_err else "no stderr", flush=True)
+                if os.path.exists(temp_output):
+                    os.remove(temp_output)
+
+        except Exception as e:
+            print("PIPED PIPELINE ERROR:", repr(e), flush=True)
+            if os.path.exists(temp_output):
+                os.remove(temp_output)
+
+        if not piped_success:
+            print("FALLING BACK TO DISK-BASED DOWNLOAD+CONVERT", flush=True)
+
+            # Download
+            try:
+                print("TRYING NORMAL YT-DLP")
+
+                subprocess.run([
+                    "yt-dlp",
+                    "--extractor-args", "youtube:player_client=android",
+                    "-f", "18/36/17",
+                    "--no-playlist",
+                    "--no-warnings",
+                    "-o", temp_input,
+                    url
+                ],
+                check=True)
+
+            except subprocess.CalledProcessError as e:
+
+                print("NORMAL FAILED, TRYING ANDROID")
+
+                subprocess.run([
+                    "yt-dlp",
+                    "--extractor-args", "youtube:player_client=android",
+                    "-f", "18/36/17",
+                    "--no-playlist",
+                    "--no-warnings",
+                    "-o", temp_input,
+                    url
+                ],
+                check=True)
+
+            print("START FFMPEG")
+            t3 = time.time()
+
+            # Try hardware-accelerated encoding first — software libx264
+            # is CPU-bound no matter how fast the preset is.
+            hw_encoders = [
+                ["-c:v", "h264_nvenc", "-preset", "p1", "-profile:v", "baseline"],
+                ["-c:v", "h264_qsv", "-preset", "veryfast", "-profile:v", "baseline"],
+            ]
+
+            encoded = False
+            for hw_args in hw_encoders:
+                try:
+                    subprocess.run([
+                        "ffmpeg",
+                        "-i", temp_input,
+                        "-vf", "scale=320:240",
+                        *hw_args,
+                        "-level", "3.0",
+                        "-pix_fmt", "yuv420p",
+
+                        "-c:a", "aac",
+                        "-profile:a", "aac_low",
+                        "-b:a", "96k",
+                        "-ar", "44100",
+                        "-ac", "2",
+
+                        "-fflags", "+genpts",
+                        "-movflags", "+faststart",
+
+                        temp_output
+                    ], check=True, capture_output=True)
+                    print("HARDWARE ENCODE SUCCEEDED:", hw_args[1], flush=True)
+                    encoded = True
+                    break
+                except Exception as e:
+                    print("HARDWARE ENCODE FAILED, trying next option:", hw_args[1], flush=True)
+                    if os.path.exists(temp_output):
+                        os.remove(temp_output)
+
+            if not encoded:
+                # known-working software fallback — unchanged from before
+                subprocess.run([
+                    "ffmpeg",
+                    "-i", temp_input,
+                "-vf", "scale=320:240",
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-profile:v", "baseline",
+                "-level", "3.0",
+                "-pix_fmt", "yuv420p",
+
+                "-c:a", "aac",
+                "-profile:a", "aac_low",
+                "-b:a", "96k",
+                "-ar", "44100",
+                "-ac", "2",
+
+                "-fflags", "+genpts",
+                "-movflags", "+faststart",
+
+                temp_output
+            ], check=True)
+
+            print("FALLBACK FFMPEG SECONDS:", time.time() - t3)
 
         print("TOTAL GETVIDEO SECONDS:", time.time() - t0)
 
