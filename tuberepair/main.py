@@ -3,6 +3,7 @@ import signal
 from flask import Flask
 from flask_compress import Compress
 import config
+print("USING CLIENT ID:", config.GOOGLE_CLIENT_ID, flush=True)
 from waitress import serve
 
 # seperated apis
@@ -10,6 +11,7 @@ from api.static import static
 from api.playlist import playlist
 from api.video import video
 from api.channel import channel
+from api.login import login     
 from modules import logs
 
 if config.CLIENT_TEST:
@@ -25,6 +27,7 @@ app.register_blueprint(static)
 app.register_blueprint(playlist)
 app.register_blueprint(video)
 app.register_blueprint(channel)
+app.register_blueprint(login)
 if config.CLIENT_TEST:
     app.register_blueprint(client_videos)
 

@@ -3,15 +3,36 @@ from flask import Blueprint, Flask, request, redirect, render_template, Response
 import config
 from modules.logs import print_with_seperator
 from modules import yt
+from api.login import (
+    extract_device_id,
+    is_device_linked,
+    any_session_linked,
+    get_valid_access_token,
+    get_logged_in_channel_id,
+    fetch_personal_feed,
+)
 import os
 import time
 import threading
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 video = Blueprint("video", __name__)
 
 featured_cache = {}
 featured_cache_time = {}
+
+# prevents multiple simultaneous requests for the same video from spawning
+# duplicate yt-dlp/ffmpeg pipelines in parallel
+_download_locks = {}
+_download_locks_guard = threading.Lock()
+_download_semaphore = threading.Semaphore(2)  # max 2 simultaneous yt-dlp/ffmpeg jobs
+
+def _get_download_lock(video_id):
+    with _download_locks_guard:
+        if video_id not in _download_locks:
+            _download_locks[video_id] = threading.Lock()
+        return _download_locks[video_id]
 
 import subprocess
 import json
@@ -57,6 +78,104 @@ def safe_int(value):
 
     return 0
 
+def enrich_view_counts(items, max_workers=10):
+    """Fetch real stats (views, duration, published date, author/channel)
+    for items missing them, concurrently instead of one-at-a-time —
+    sequential per-item calls on a 20-30 item feed is what caused Top
+    Rated to time out. Also used to backfill author/authorId when a
+    fragile client-side parse (e.g. InnerTube's tileRenderer for
+    Subscriptions) couldn't resolve the channel — Invidious's per-video
+    metadata reliably has both, so this doubles as channel ID -> name
+    translation wherever it's missing."""
+    def _looks_like_raw_id(item):
+        author = item.get("author") or ""
+        return author.startswith("UC") and len(author) > 15
+
+    to_fetch = [
+        item for item in items
+        if item and (
+            not item.get("viewCount")
+            or not item.get("lengthSeconds")
+            or not item.get("author") or item.get("author") in ("Unknown", "unknown")
+            or not item.get("authorId") or item.get("authorId") == "unknown"
+            or _looks_like_raw_id(item)
+        )
+    ]
+    print(f"ENRICH_VIEW_COUNTS: {len(items)} items total, {len(to_fetch)} need enrichment", flush=True)
+
+    # hard safety cap — 200 items needing enrichment (as seen on Most
+    # Viewed) is what caused the timeout even with parallelization.
+    # Anything beyond this just doesn't get enriched rather than
+    # blocking the whole request.
+    MAX_ENRICH = 30
+    if len(to_fetch) > MAX_ENRICH:
+        print(f"ENRICH_VIEW_COUNTS: capping {len(to_fetch)} down to {MAX_ENRICH}", flush=True)
+        to_fetch = to_fetch[:MAX_ENRICH]
+
+    if not to_fetch:
+        return items
+
+    def _fetch(item):
+        try:
+            stats = get.fetch(
+                f"{config.URL}/api/v1/videos/{item['videoId']}"
+                f"?fields=type,viewCount,lengthSeconds,published,author,authorId"
+            )
+            if stats:
+                # the individual video endpoint's 'type' field is a more
+                # reliable live-stream signal than whatever flags the
+                # original list source did or didn't set — mark it so
+                # callers can filter it out even if it slipped past the
+                # earlier list-level check
+                if stats.get("type") == "livestream":
+                    item["_is_live"] = True
+
+                if not item.get("viewCount"):
+                    item["viewCount"] = int(stats.get("viewCount") or 0)
+                if not item.get("lengthSeconds"):
+                    item["lengthSeconds"] = int(stats.get("lengthSeconds") or 0)
+                if not item.get("published"):
+                    item["published"] = int(stats.get("published") or 0)
+                if not item.get("author") or item.get("author") in ("Unknown", "unknown"):
+                    real_author = stats.get("author")
+                    if real_author:
+                        item["author"] = html.escape(str(real_author))
+                if not item.get("authorId") or item.get("authorId") == "unknown":
+                    real_author_id = stats.get("authorId")
+                    if real_author_id:
+                        item["authorId"] = str(real_author_id)
+        except Exception as e:
+            print("STATS ENRICH FAILED:", item.get("videoId"), e, flush=True)
+
+        # last resort: if we still don't have a readable name but do have
+        # a real channel ID, resolve it directly via the channel endpoint
+        try:
+            author = item.get("author") or ""
+            author_id = item.get("authorId") or "unknown"
+            looks_like_raw_id = author.startswith("UC") and len(author) > 15
+            print(
+                "NAME FALLBACK CHECK:", item.get("videoId"),
+                "author=", repr(author), "authorId=", author_id,
+                "looks_like_raw_id=", looks_like_raw_id,
+                flush=True
+            )
+            if author_id != "unknown" and (not author or author in ("Unknown", "unknown") or looks_like_raw_id):
+                real_name = get_channel_name_from_id(author_id)
+                if real_name:
+                    item["author"] = html.escape(str(real_name))
+                    print("NAME FALLBACK APPLIED:", item.get("videoId"), "->", real_name, flush=True)
+        except Exception as e:
+            print("NAME FALLBACK FAILED:", item.get("videoId"), e, flush=True)
+
+        return item
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_fetch, item) for item in to_fetch]
+        for future in as_completed(futures):
+            future.result()
+
+    return items
+
 def get_relevant_videos(video_id):
     try:
         r = requests.get(
@@ -70,12 +189,11 @@ def get_relevant_videos(video_id):
             results = []
 
             for vid in data.get("recommendedVideos", []):
-                print("VIEWCOUNT RAW:", repr(vid.get("viewCount")))
-                print("FULL RELATED ITEM:", vid)
                 item = normalize_video(vid)
-
                 if item:
                     results.append(item)
+
+            results = enrich_view_counts(results)
 
             if results:
                 return results[:15]
@@ -186,6 +304,26 @@ def apply_cached_metadata(item):
 
     return item
 
+def build_login_prompt(req):
+    device_id = extract_device_id(req)
+    linked = is_device_linked(device_id) or any_session_linked()
+    print("LOGIN PROMPT CHECK device_id:", device_id, "linked:", linked, flush=True)
+    if linked:
+        return None
+
+    link_url = f"{req.url_root.rstrip('/')}/o/oauth2/programmatic_auth?device_id={device_id or 'unknown'}"
+
+    return {
+        "title": html.escape(f"Login here: {link_url}"),
+        "videoId": "login_prompt",
+        "author": "Server",
+        "authorId": "unknown",
+        "viewCount": 0,
+        "lengthSeconds": 0,
+        "published": int(time.time()),
+        "description": "Go to this URL on any device to create a login and link this one."
+    }
+
 def normalize_video(vid):
     title = vid.get("title") or "Untitled"
     video_id = vid.get("videoId") or vid.get("id")
@@ -231,16 +369,31 @@ def normalize_video(vid):
 
     print("RELATED VIDEO KEYS:", vid.keys())
 
-@video.route("/feeds/api/users/<path:channel>")
-@video.route("/feeds/api/users/<path:channel>/")
-@video.route("/feeds/api/users/<path:channel>/uploads")
-@video.route("/feeds/api/users/<path:channel>/favorites")
-@video.route("/feeds/api/users/<path:channel>/playlists")
-@video.route("/feeds/api/users/<path:channel>/subscriptions")
+@video.route("/feeds/api/users/<channel>")
+@video.route("/feeds/api/users/<channel>/")
+@video.route("/feeds/api/users/<channel>/uploads")
+@video.route("/feeds/api/users/<channel>/playlists")
 def channel_uploads(channel):
     print("CHANNEL ROUTE HIT:", channel, flush=True)
 
     try:
+        if channel == "default":
+            device_id = extract_device_id(request)
+            print("CHANNEL_UPLOADS extracted device_id:", device_id, flush=True)
+            access_token = get_valid_access_token(device_id)
+            print("CHANNEL_UPLOADS access_token present:", bool(access_token), flush=True)
+            resolved_own_channel = get_logged_in_channel_id(access_token) if access_token else None
+            print("CHANNEL_UPLOADS resolved_own_channel:", resolved_own_channel, flush=True)
+            if resolved_own_channel:
+                channel = resolved_own_channel
+            else:
+                return get.template("uploads.jinja2", {
+                    "data": [],
+                    "unix": get.unix,
+                    "url": request.url_root.rstrip("/"),
+                    "continuation": None,
+                })
+
         if not channel.startswith("UC"):
             resolved = get_channel_id_from_name(channel)
 
@@ -257,6 +410,22 @@ def channel_uploads(channel):
             return get.error()
 
         videos = data.get("videos", [])
+
+        # honor GData's numeric start-index/max-results pagination by
+        # slicing locally, since Invidious only gives us one page at a
+        # time with no way to jump to an arbitrary numeric offset.
+        # Returning an EMPTY page once we run out is what tells the
+        # classic app to stop requesting more pages instead of looping.
+        try:
+            start_index = max(int(request.args.get("start-index", 1)), 1)
+        except (TypeError, ValueError):
+            start_index = 1
+        try:
+            max_results = max(int(request.args.get("max-results", 25)), 1)
+        except (TypeError, ValueError):
+            max_results = 25
+
+        videos = videos[start_index - 1: start_index - 1 + max_results]
 
         clean = []
 
@@ -309,6 +478,379 @@ def channel_uploads(channel):
         print("CHANNEL UPLOADS ERROR:", e, flush=True)
         return get.error()
 
+@video.route("/feeds/api/users/<channel>/subscriptions")
+def subscriptions_list(channel):
+    """Real Subscriptions list — the channels you're subscribed to, via
+    YouTube Data API v3's subscriptions.list. This used to route through
+    channel_uploads(), which showed a video feed instead of an actual
+    subscriptions list — meaning there was never any way for the app to
+    tell 'am I subscribed to X', since it wasn't looking at subscription
+    data at all. Each entry includes its real subscription ID so the
+    app's unsubscribe (DELETE) action has something valid to reference."""
+    device_id = extract_device_id(request)
+    access_token = get_valid_access_token(device_id)
+
+    url = request.url_root.rstrip("/")
+    empty = get.template("uploads.jinja2", {
+        "data": [], "unix": get.unix, "url": url, "continuation": None,
+    })
+
+    if not access_token:
+        return empty
+
+    try:
+        r = requests.get(
+            "https://www.googleapis.com/youtube/v3/subscriptions",
+            params={"part": "snippet", "mine": "true", "maxResults": 25},
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10,
+        )
+        print("SUBSCRIPTIONS LIST status:", r.status_code, flush=True)
+        if not r.ok:
+            print("SUBSCRIPTIONS LIST body:", r.text[:400], flush=True)
+            return empty
+        items = r.json().get("items", [])
+    except Exception as e:
+        print("SUBSCRIPTIONS LIST ERROR:", repr(e), flush=True)
+        return empty
+
+    clean = []
+    for it in items:
+        snippet = it.get("snippet", {})
+        sub_id = it.get("id")
+        channel_id = snippet.get("resourceId", {}).get("channelId", "unknown")
+        clean.append({
+            "title": html.escape(snippet.get("title", "Untitled")),
+            "videoId": sub_id,  # not a real video — used as the entry's unique id in the template
+            "author": html.escape(snippet.get("title", "Unknown")),
+            "authorId": channel_id,
+            "viewCount": 0,
+            "lengthSeconds": 0,
+            "published": 0,
+            "description": html.escape(snippet.get("description", "")[:120]),
+        })
+
+    return get.template("uploads.jinja2", {
+        "data": clean,
+        "unix": get.unix,
+        "url": url,
+        "continuation": None,
+    })
+
+@video.route("/feeds/api/users/<channel>/subscriptions/<subscription_id>", methods=["DELETE"])
+def unsubscribe(channel, subscription_id):
+    """Unsubscribe, backed by YouTube Data API v3's subscriptions.delete.
+    Confirmed against a real capture — the app DELETEs using the real
+    subscription ID it got back from subscribe_to_channel()'s response."""
+    device_id = extract_device_id(request)
+    access_token = get_valid_access_token(device_id)
+    if not access_token:
+        return get.error()
+
+    try:
+        r = requests.delete(
+            "https://www.googleapis.com/youtube/v3/subscriptions",
+            params={"id": subscription_id},
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10,
+        )
+        print("UNSUBSCRIBE status:", r.status_code, flush=True)
+        if r.status_code not in (200, 204):
+            print("UNSUBSCRIBE body:", r.text[:400], flush=True)
+            return get.error()
+    except Exception as e:
+        print("UNSUBSCRIBE ERROR:", repr(e), flush=True)
+        return get.error()
+
+    return "", 200
+
+@video.route("/feeds/api/users/<channel>/subscriptions", methods=["POST"])
+def subscribe_to_channel(channel):
+    """Real subscribe action, backed by YouTube Data API v3's
+    subscriptions.insert. The classic app POSTs an XML body like:
+        <entry ...><yt:username>CHANNEL_ID</yt:username></entry>
+    (note: despite the tag name, this app puts a real channel ID here,
+    not a username string — confirmed from a live capture)."""
+    device_id = extract_device_id(request)
+    access_token = get_valid_access_token(device_id)
+    if not access_token:
+        return get.error()
+
+    try:
+        body = request.get_data(as_text=True)
+        root = ET.fromstring(body)
+    except Exception as e:
+        print("SUBSCRIBE PARSE ERROR:", e, flush=True)
+        return get.error()
+
+    ns = {"yt": "http://gdata.youtube.com/schemas/2007"}
+    username_el = root.find("yt:username", ns)
+    target_channel_id = username_el.text.strip() if username_el is not None and username_el.text else None
+
+    if not target_channel_id:
+        print("SUBSCRIBE: no channel id found in body", flush=True)
+        return get.error()
+
+    try:
+        r = requests.post(
+            "https://www.googleapis.com/youtube/v3/subscriptions",
+            params={"part": "snippet"},
+            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+            json={"snippet": {"resourceId": {"kind": "youtube#channel", "channelId": target_channel_id}}},
+            timeout=10,
+        )
+        print("SUBSCRIBE status:", r.status_code, flush=True)
+        if not r.ok:
+            print("SUBSCRIBE body:", r.text[:400], flush=True)
+            return get.error()
+        new_sub = r.json()
+    except Exception as e:
+        print("SUBSCRIBE ERROR:", repr(e), flush=True)
+        return get.error()
+
+    sub_id = new_sub.get("id", target_channel_id)
+    published = new_sub.get("snippet", {}).get("publishedAt") or "2026-01-01T00:00:00.000Z"
+    url_root = request.url_root.rstrip("/")
+
+    return Response(
+        "<?xml version='1.0' encoding='UTF-8'?>"
+        "<entry xmlns='http://www.w3.org/2005/Atom' xmlns:yt='http://gdata.youtube.com/schemas/2007' "
+        "xmlns:gd='http://schemas.google.com/g/2005'>"
+        f"<id>tag:youtube.com,2008:subscription:{sub_id}</id>"
+        f"<published>{published}</published>"
+        f"<updated>{published}</updated>"
+        "<category scheme='http://schemas.google.com/g/2005#kind' term='http://gdata.youtube.com/schemas/2007#subscription'/>"
+        "<category scheme='http://gdata.youtube.com/schemas/2007/subscriptiontypes.cat' term='channel'/>"
+        f"<link rel='self' type='application/atom+xml' href='{url_root}/feeds/api/users/default/subscriptions/{sub_id}'/>"
+        f"<link rel='edit' type='application/atom+xml' href='{url_root}/feeds/api/users/default/subscriptions/{sub_id}'/>"
+        f"<yt:username>{target_channel_id}</yt:username>"
+        "</entry>",
+        mimetype="application/atom+xml"
+    )
+
+@video.route("/feeds/api/users/<channel>/favorites")
+def favorites(channel):
+    """Favorites — backed by the real YouTube Liked Videos playlist
+    ('LL' is a reserved special playlist ID that resolves to 'your
+    liked videos' for whichever account the access token belongs to).
+    This used to reuse channel_uploads()'s logic, which made it show
+    the exact same list as Uploads and appears to have triggered a
+    broken 'merge accounts' prompt in the app — hence its own route."""
+    device_id = extract_device_id(request)
+    access_token = get_valid_access_token(device_id)
+
+    url = request.url_root.rstrip("/")
+    empty = get.template("uploads.jinja2", {
+        "data": [], "unix": get.unix, "url": url, "continuation": None,
+    })
+
+    if not access_token:
+        return empty
+
+    try:
+        r = requests.get(
+            "https://www.googleapis.com/youtube/v3/playlistItems",
+            params={"part": "snippet", "playlistId": "LL", "maxResults": 25},
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10,
+        )
+        print("FAVORITES (LL) status:", r.status_code, flush=True)
+        if not r.ok:
+            print("FAVORITES (LL) body:", r.text[:400], flush=True)
+            return empty
+        items = r.json().get("items", [])
+    except Exception as e:
+        print("FAVORITES ERROR:", repr(e), flush=True)
+        return empty
+
+    clean = []
+    for it in items:
+        snippet = it.get("snippet", {})
+        vid_id = snippet.get("resourceId", {}).get("videoId")
+        if not vid_id:
+            continue
+        clean.append({
+            "title": html.escape(snippet.get("title", "Untitled")),
+            "videoId": vid_id,
+            "author": html.escape(snippet.get("videoOwnerChannelTitle", "Unknown")),
+            "authorId": snippet.get("videoOwnerChannelId", "unknown"),
+            "viewCount": 0,
+            "lengthSeconds": 0,
+            "published": 0,
+            "description": "",
+        })
+
+    clean = enrich_view_counts(clean)
+
+    return get.template("uploads.jinja2", {
+        "data": clean,
+        "unix": get.unix,
+        "url": url,
+        "continuation": None,
+    })
+
+@video.route("/feeds/api/users/<channel>/favorites", methods=["POST"])
+def add_favorite(channel):
+    """Add-to-favorites, backed by YouTube Data API v3's videos.rate
+    (liking a video also adds it to the Liked Videos / 'LL' playlist,
+    which is what our Favorites GET route already reads from). UNVERIFIED
+    against a real capture — built against the documented historical
+    GData v2 convention (POST body containing
+    <id>tag:youtube.com,2008:video:VIDEO_ID</id>). Test this and send
+    the actual request if it doesn't work."""
+    device_id = extract_device_id(request)
+    access_token = get_valid_access_token(device_id)
+    if not access_token:
+        return get.error()
+
+    try:
+        body = request.get_data(as_text=True)
+        root = ET.fromstring(body)
+    except Exception as e:
+        print("ADD_FAVORITE PARSE ERROR:", e, flush=True)
+        return get.error()
+
+    ns = {"atom": "http://www.w3.org/2005/Atom"}
+    id_el = root.find("atom:id", ns)
+    if id_el is None:
+        id_el = root.find("id")  # some GData clients omit the namespace prefix
+
+    if id_el is None or not id_el.text:
+        print("ADD_FAVORITE: no video id found in body", flush=True)
+        return get.error()
+
+    video_id = id_el.text.strip().rsplit(":", 1)[-1]
+
+    try:
+        r = requests.post(
+            "https://www.googleapis.com/youtube/v3/videos/rate",
+            params={"id": video_id, "rating": "like"},
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10,
+        )
+        print("ADD_FAVORITE status:", r.status_code, flush=True)
+        if not r.ok:
+            print("ADD_FAVORITE body:", r.text[:400], flush=True)
+            return get.error()
+    except Exception as e:
+        print("ADD_FAVORITE ERROR:", repr(e), flush=True)
+        return get.error()
+
+    return Response(
+        "<?xml version='1.0' encoding='UTF-8'?>"
+        "<entry xmlns='http://www.w3.org/2005/Atom' xmlns:yt='http://gdata.youtube.com/schemas/2007'>"
+        f"<id>tag:youtube.com,2008:video:{video_id}</id>"
+        "</entry>",
+        mimetype="application/atom+xml"
+    )
+
+@video.route("/feeds/api/users/<channel>/playlists", methods=["POST"])
+def create_playlist(channel):
+    """Create-new-playlist, backed by YouTube Data API v3's
+    playlists.insert. UNVERIFIED against a real capture — built against
+    the documented historical GData v2 convention (POST body containing
+    <title> and optionally <summary>). Test this and send the actual
+    request if it doesn't work."""
+    device_id = extract_device_id(request)
+    access_token = get_valid_access_token(device_id)
+    if not access_token:
+        return get.error()
+
+    try:
+        body = request.get_data(as_text=True)
+        root = ET.fromstring(body)
+    except Exception as e:
+        print("CREATE_PLAYLIST PARSE ERROR:", e, flush=True)
+        return get.error()
+
+    ns = {"atom": "http://www.w3.org/2005/Atom"}
+    title_el = root.find("atom:title", ns)
+    summary_el = root.find("atom:summary", ns)
+
+    title = title_el.text.strip() if title_el is not None and title_el.text else "New Playlist"
+    description = summary_el.text.strip() if summary_el is not None and summary_el.text else ""
+
+    try:
+        r = requests.post(
+            "https://www.googleapis.com/youtube/v3/playlists",
+            params={"part": "snippet,status"},
+            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+            json={
+                "snippet": {"title": title, "description": description},
+                "status": {"privacyStatus": "private"},
+            },
+            timeout=10,
+        )
+        print("CREATE_PLAYLIST status:", r.status_code, flush=True)
+        if not r.ok:
+            print("CREATE_PLAYLIST body:", r.text[:400], flush=True)
+            return get.error()
+        new_playlist = r.json()
+    except Exception as e:
+        print("CREATE_PLAYLIST ERROR:", repr(e), flush=True)
+        return get.error()
+
+    playlist_id = new_playlist.get("id", "")
+    published = new_playlist.get("snippet", {}).get("publishedAt") or "2026-01-01T00:00:00.000Z"
+    url_root = request.url_root.rstrip("/")
+
+    return Response(
+        "<?xml version='1.0' encoding='UTF-8'?>"
+        "<entry xmlns='http://www.w3.org/2005/Atom' xmlns:yt='http://gdata.youtube.com/schemas/2007' "
+        "xmlns:gd='http://schemas.google.com/g/2005'>"
+        f"<id>tag:youtube.com,2008:playlist:{playlist_id}</id>"
+        f"<published>{published}</published>"
+        f"<updated>{published}</updated>"
+        "<category scheme='http://schemas.google.com/g/2005#kind' term='http://gdata.youtube.com/schemas/2007#playlistLink'/>"
+        f"<title type='text'>{html.escape(title)}</title>"
+        f"<summary type='text'>{html.escape(description)}</summary>"
+        f"<link rel='self' type='application/atom+xml' href='{url_root}/feeds/api/playlists/{playlist_id}'/>"
+        f"<link rel='edit' type='application/atom+xml' href='{url_root}/feeds/api/playlists/{playlist_id}'/>"
+        f"<link rel='http://gdata.youtube.com/schemas/2007#video.responses' type='application/atom+xml' href='{url_root}/feeds/api/playlists/{playlist_id}'/>"
+        f"<yt:playlistId>{playlist_id}</yt:playlistId>"
+        "<yt:countHint>0</yt:countHint>"
+        "</entry>",
+        mimetype="application/atom+xml"
+    )
+
+# real per-account feeds, backed by the linked Google account's access
+# token via YouTube's internal InnerTube API (Invidious can't serve these
+# since it has no idea who you are — only Google does)
+PERSONAL_BROWSE_IDS = {
+    "newsubscriptionvideos": "FEsubscriptions",
+    "watchhistory": "FEhistory",
+    "watchlater": "VLWL",
+}
+
+@video.route("/feeds/api/users/<channel>/newsubscriptionvideos")
+@video.route("/feeds/api/users/<channel>/watchhistory")
+@video.route("/feeds/api/users/<channel>/watchlater")
+@video.route("/feeds/api/users/<channel>/recommendations")
+def personalized_feed_stub(channel):
+    feed_name = request.path.rstrip("/").split("/")[-1]
+    print("PERSONALIZED FEED HIT:", feed_name, flush=True)
+
+    data = []
+    browse_id = PERSONAL_BROWSE_IDS.get(feed_name)
+
+    if browse_id:
+        device_id = extract_device_id(request)
+        access_token = get_valid_access_token(device_id)
+        if access_token:
+            try:
+                data = fetch_personal_feed(access_token, browse_id, limit=15)
+                data = enrich_view_counts(data)
+            except Exception as e:
+                print("PERSONALIZED FEED ERROR:", feed_name, e, flush=True)
+                data = []
+
+    return get.template("uploads.jinja2", {
+        "data": data,
+        "unix": get.unix,
+        "url": request.url_root.rstrip("/"),
+        "continuation": None,
+    })
+
 def get_playlist_from_invidious(playlist_id):
     url = f"{config.URL}/api/v1/playlists/{playlist_id}"
 
@@ -327,6 +869,25 @@ def get_playlist_from_invidious(playlist_id):
 
         playlist = r.json()
         videos = playlist.get("videos", [])
+
+        # normalize_video() resolves missing authorId via a real network
+        # search per unique channel name — doing that serially for ~30
+        # videos (most uncached on a fresh load) is what was making
+        # Featured slow to load. Resolve every unique name concurrently
+        # first so the cache is already warm by the time the loop below
+        # runs, instead of blocking on one search at a time.
+        unique_names = {
+            (vid.get("author") or vid.get("uploader") or vid.get("channel"))
+            for vid in videos
+            if not (vid.get("authorId") or vid.get("uploader_id") or vid.get("channel_id"))
+            and (vid.get("author") or vid.get("uploader") or vid.get("channel"))
+        }
+        uncached_names = [n for n in unique_names if n not in channel_id_cache]
+        if uncached_names:
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = [executor.submit(get_channel_id_from_name, n) for n in uncached_names]
+                for future in as_completed(futures):
+                    future.result()
 
         clean = []
 
@@ -386,6 +947,8 @@ def get_featured_from_hourly_playlists():
 
         seen.add(vid_id)
 
+        view_count = int(vid.get("viewCount") or vid.get("view_count") or 0)
+
         item = {
             "title": html.escape(title),
             "videoId": vid_id,
@@ -399,10 +962,9 @@ def get_featured_from_hourly_playlists():
                 vid.get("authorId")
                 or vid.get("uploader_id")
                 or vid.get("channel_id")
-                or get_channel_id_from_name(vid.get("author") or vid.get("uploader") or vid.get("channel"))
                 or "unknown"
             ),
-            "viewCount": int(vid.get("viewCount") or vid.get("view_count") or 0),
+            "viewCount": view_count,
             "lengthSeconds": int(vid.get("lengthSeconds") or vid.get("duration") or 0),
             "published": int(vid.get("published") or vid.get("timestamp") or 0),
             "description": html.escape((vid.get("description") or "")[:120])
@@ -426,14 +988,49 @@ def get_featured_from_hourly_playlists():
         item = apply_cached_metadata(item)
         data.append(item)
 
-        if len(data) >= 30:
+        if len(data) >= 15:
             random.shuffle(data)
-            return data
+            return enrich_view_counts(data)
 
     random.shuffle(data)
-    return data
+    return enrich_view_counts(data)
 
 channel_id_cache = {}
+channel_name_cache = {}
+
+def get_channel_name_from_id(channel_id):
+    """Reverse of get_channel_id_from_name — resolves a real channel name
+    from an ID, for sources that only give us the raw UC... ID with no
+    readable name attached."""
+    if not channel_id or channel_id == "unknown":
+        print("GET_CHANNEL_NAME_FROM_ID: skipped, no usable id:", channel_id, flush=True)
+        return None
+
+    if channel_id in channel_name_cache:
+        print("GET_CHANNEL_NAME_FROM_ID cache hit:", channel_id, "->", channel_name_cache[channel_id], flush=True)
+        return channel_name_cache[channel_id]
+
+    try:
+        r = requests.get(
+            f"{config.URL}/api/v1/channels/{channel_id}",
+            timeout=10,
+        )
+        print("GET_CHANNEL_NAME_FROM_ID status:", channel_id, r.status_code, flush=True)
+        if not r.ok:
+            print("GET_CHANNEL_NAME_FROM_ID body:", r.text[:300], flush=True)
+            return None
+        data = r.json()
+        name = data.get("author")
+        print("GET_CHANNEL_NAME_FROM_ID resolved name:", channel_id, "->", repr(name), flush=True)
+        if name:
+            channel_name_cache[channel_id] = name
+            return name
+        else:
+            print("GET_CHANNEL_NAME_FROM_ID: response had no 'author' field, raw keys:", list(data.keys()), flush=True)
+    except Exception as e:
+        print("GET CHANNEL NAME FROM ID FAILED:", channel_id, e, flush=True)
+
+    return None
 
 def get_channel_id_from_name(name):
 
@@ -533,26 +1130,17 @@ def frontpage(regioncode="US", popular=None, res=''):
     now = time.time()
     cache_key = f"{popular}_{regioncode}"
 
-    if cache_key in featured_cache and now - featured_cache_time.get(cache_key, 0) < 21600:
-        print("FEATURED CACHE HIT:", cache_key)
-        data = [
-            apply_cached_metadata(item)
-            for item in data
-        ]
+    now = time.time()
+    cache_key = f"{popular}_{regioncode}"
 
-        featured_cache[cache_key] = data
+    print("FEATURED RELOAD (no whole-feed cache):", cache_key)
+
+    if popular == "most_viewed":
+        data = get_most_viewed_from_playlist()
     else:
-        print("FEATURED CACHE MISS:", cache_key)
+        data = get_featured_from_hourly_playlists()
 
-        if popular == "most_viewed":
-            data = get_most_viewed_from_playlist()
-        else:
-            data = get_featured_from_hourly_playlists()
-
-        print("FEATURED COUNT:", len(data))
-
-        featured_cache[cache_key] = data
-        featured_cache_time[cache_key] = now
+    print("FEATURED COUNT:", len(data))
 
     # Will be used for checking Classic
     user_agent = request.headers.get('User-Agent').lower()
@@ -562,6 +1150,10 @@ def frontpage(regioncode="US", popular=None, res=''):
         url = url[:-1]
 
         if data:
+
+            prompt = build_login_prompt(request)
+            if prompt:
+                data = [prompt] + data
 
             if config.SPYING == True:
                 print_with_seperator("Region code: " + regioncode)
@@ -607,20 +1199,41 @@ def get_most_viewed_from_playlist():
         )
 
         data = []
+        parsed_vids = []
 
         for line in result.stdout.splitlines():
             try:
-                vid = json.loads(line)
-                item = normalize_video(vid)
-
-                if item:
-                    data.append(item)
-
+                parsed_vids.append(json.loads(line))
             except Exception as e:
                 print("MOST VIEWED PARSE ERROR:", e)
 
+        # same fix as get_playlist_from_invidious() — resolve every
+        # unique channel name concurrently first so normalize_video()'s
+        # serial loop below hits a warm cache instead of making a live
+        # search call per video, one at a time.
+        unique_names = {
+            (vid.get("uploader") or vid.get("channel") or vid.get("author"))
+            for vid in parsed_vids
+            if not (vid.get("uploader_id") or vid.get("channel_id") or vid.get("authorId"))
+            and (vid.get("uploader") or vid.get("channel") or vid.get("author"))
+        }
+        uncached_names = [n for n in unique_names if n not in channel_id_cache]
+        if uncached_names:
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = [executor.submit(get_channel_id_from_name, n) for n in uncached_names]
+                for future in as_completed(futures):
+                    future.result()
+
+        for vid in parsed_vids:
+            item = normalize_video(vid)
+
+            if item:
+                data.append(item)
+
     random.shuffle(data)
-    return data[:15]
+    data = data[:15]
+    data = enrich_view_counts(data)
+    return data
 
 @video.route("/feeds/api/most_viewed")
 @video.route("/<int:res>/feeds/api/most_viewed")
@@ -641,65 +1254,73 @@ def most_viewed(res=''):
     cache_key = "most_viewed"
     now = time.time()
 
-    if cache_key in featured_cache and now - featured_cache_time.get(cache_key, 0) < 1800:
-        print("MOST VIEWED CACHE HIT")
-        data = featured_cache[cache_key]
-    else:
-        print("MOST VIEWED CACHE MISS")
+    print("MOST VIEWED RELOAD (no whole-feed cache)")
 
-        result = subprocess.run(
-            ["yt-dlp", "ytsearch15:viral trending popular videos", "--dump-json", "--no-playlist"],
-            capture_output=True,
-            text=True
-        )
+    result = subprocess.run(
+        ["yt-dlp", "ytsearch15:viral trending popular videos", "--dump-json", "--no-playlist"],
+        capture_output=True,
+        text=True
+    )
 
-        data = []
+    parsed_vids = []
+    for line in result.stdout.splitlines():
+        try:
+            vid = json.loads(line)
+            if vid.get("id") and vid.get("duration") != 0 and not vid.get("is_live"):
+                parsed_vids.append(vid)
+        except Exception as e:
+            print("MOST VIEWED PARSE ERROR:", e)
 
-        for line in result.stdout.splitlines():
-            try:
-                vid = json.loads(line)
-                if not vid.get("id"):
-                    continue
+    # pre-warm the channel-id cache in parallel instead of the previous
+    # code's redundant serial get_channel_id_from_name() calls (it was
+    # called twice per video, one-at-a-time — same bottleneck Featured had)
+    unique_names = {
+        (vid.get("uploader") or vid.get("channel"))
+        for vid in parsed_vids
+        if not (vid.get("channel_id") or vid.get("uploader_id"))
+        and (vid.get("uploader") or vid.get("channel"))
+    }
+    uncached_names = [n for n in unique_names if n not in channel_id_cache]
+    if uncached_names:
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = [executor.submit(get_channel_id_from_name, n) for n in uncached_names]
+            for future in as_completed(futures):
+                future.result()
 
-                item = {
-                    "title": html.escape(vid.get("title") or "Untitled"),
-                    "videoId": vid.get("id"),
-                    "author": html.escape(vid.get("uploader") or "Unknown"),
-                    "authorId": vid.get("channel_id") or vid.get("uploader_id") or get_channel_id_from_name(vid.get("author") or vid.get("uploader") or vid.get("channel")) or "unknown",
-                    "viewCount": int(vid.get("view_count") or 0),
-                    "lengthSeconds": int(vid.get("duration") or 0),
-                    "published": int(vid.get("timestamp") or 0),
-                    "description": html.escape((vid.get("description") or "")[:120])
-                }
+    data = []
 
-                print("UPLOADER ID:", item["author"], item["authorId"], flush=True)
+    for vid in parsed_vids:
+        try:
+            if vid.get("live_status") == "is_live" or vid.get("is_live"):
+                continue
 
-                item["authorId"] = (
-                    item.get("authorId")
-                    if item.get("authorId") not in ["unknown", "Unknown", "", None]
-                    else get_channel_id_from_name(item.get("author"))
-                )
+            item = {
+                "title": html.escape(vid.get("title") or "Untitled"),
+                "videoId": vid.get("id"),
+                "author": html.escape(vid.get("uploader") or "Unknown"),
+                "authorId": vid.get("channel_id") or vid.get("uploader_id") or "unknown",
+                "viewCount": int(vid.get("view_count") or 0),
+                "lengthSeconds": int(vid.get("duration") or 0),
+                "published": int(vid.get("timestamp") or 0),
+                "description": html.escape((vid.get("description") or "")[:120])
+            }
 
-                print(
-                    "UPLOADER DEBUG:",
-                    item.get("author"),
-                    item.get("authorId"),
-                    flush=True
-                )
+            item = apply_cached_metadata(item)
+            data.append(item)
 
-                item = apply_cached_metadata(item)
-                data.append(item)
+        except Exception as e:
+            print("MOST VIEWED ERROR:", e)
 
-            except Exception as e:
-                print("MOST VIEWED ERROR:", e)
-
-        featured_cache[cache_key] = data
-        featured_cache_time[cache_key] = now
+    data = enrich_view_counts(data)
 
     if url[-1] == '/':
         url = url[:-1]
 
     print("MOST VIEWED COUNT:", len(data))
+
+    prompt = build_login_prompt(request)
+    if prompt:
+        data = [prompt] + data
 
     user_agent = request.headers.get('User-Agent', '').lower()
 
@@ -746,6 +1367,76 @@ def cleanup_old_files():
 
 
 # search for videos
+def _handle_batch_request(res=''):
+    """Shared GData batch-query handler. Multiple feeds (History's
+    /feeds/api/videos/batch, Featured's declared .../recently_featured/batch
+    link, etc.) all POST the same kind of <feed><entry><id>...</id></entry>
+    batch body and expect the same kind of response — so this is reused
+    across routes instead of duplicated."""
+    if type(res) == int:
+        res = min(max(res, 144), config.RESMAX)
+
+    url = request.url_root + str(res)
+    if url[-1] == '/':
+        url = url[:-1]
+
+    try:
+        body = request.get_data(as_text=True)
+        root = ET.fromstring(body)
+    except Exception as e:
+        print("BATCH PARSE ERROR:", e, flush=True)
+        return get.error()
+
+    ns = {"atom": "http://www.w3.org/2005/Atom"}
+
+    video_ids = []
+    for entry in root.findall("atom:entry", ns):
+        id_el = entry.find("atom:id", ns)
+        if id_el is not None and id_el.text:
+            video_ids.append(id_el.text.strip().rsplit("/", 1)[-1])
+
+    print("BATCH VIDEO IDS:", video_ids, flush=True)
+
+    clean = []
+    for vid_id in video_ids:
+        data = get.fetch(f"{config.URL}/api/v1/videos/{vid_id}")
+        if not data:
+            continue
+        item = normalize_video(data)
+        if item:
+            clean.append(item)
+
+    print("BATCH RESOLVED COUNT:", len(clean), flush=True)
+
+    return get.template("batch_videos.jinja2", {
+        "data": clean,
+        "unix": get.unix,
+        "url": url,
+    })
+
+@video.route("/feeds/api/videos/batch", methods=["POST"])
+@video.route("/<int:res>/feeds/api/videos/batch", methods=["POST"])
+def videos_batch(res=''):
+    """GData batch query — used by History. The app keeps its own local
+    list of watched video IDs on-device and POSTs them here as a batch
+    <feed> of <entry><id>...</id></entry> elements, expecting metadata
+    for each back in one response."""
+    return _handle_batch_request(res)
+
+@video.route("/feeds/api/standardfeeds/<regioncode>/<popular>/batch", methods=["POST"])
+@video.route("/feeds/api/standardfeeds/<popular>/batch", methods=["POST"])
+@video.route("/<int:res>/feeds/api/standardfeeds/<regioncode>/<popular>/batch", methods=["POST"])
+@video.route("/<int:res>/feeds/api/standardfeeds/<popular>/batch", methods=["POST"])
+def standardfeeds_batch(regioncode="US", popular=None, res=''):
+    """The Featured/Most Viewed template declares this batch link on
+    every response (<link rel='...#batch' href='.../batch' />). It looks
+    like some app action (e.g. Favorites' 'merge' prompt) POSTs to
+    whatever batch link it currently has cached — even from an unrelated
+    screen — and previously got a hard 404 here, which is the likely
+    trigger for the forced sign-out. Handling it the same way as the
+    History batch endpoint avoids that."""
+    return _handle_batch_request(res)
+
 @video.route("/feeds/api/videos")
 @video.route("/feeds/api/videos/")
 @video.route("/<int:res>/feeds/api/videos")
@@ -764,7 +1455,55 @@ def search_videos(res=''):
     search_keyword = request.args.get('q')
 
     if not search_keyword:
-        return get.error()
+        # "Most Recent" tab: the classic app calls this same endpoint with
+        # no q=, just orderby=updated, expecting a general recent-videos
+        # feed rather than a search. General /trending mixes in live
+        # streams, sports, and news broadcasts — at some times of day
+        # that's ALL it returns, which is why this looked broken even
+        # though the live-filter was working correctly. Using search with
+        # type=video excludes live/upcoming content at the source instead
+        # of relying on filtering after the fact.
+        data = get.fetch(
+            f"{config.URL}/api/v1/search"
+            f"?q=*&type=video&sort_by=upload_date&region=US"
+        )
+        print("MOST RECENT: search fetch returned", len(data) if data else 0, "raw items", flush=True)
+        if not data:
+            return get.error()
+
+        clean = []
+        for vid in data:
+            # still filter defensively in case a live/upcoming item
+            # slips through the type=video search anyway
+            if vid.get("type") == "livestream" or vid.get("liveNow") or vid.get("isLive") or vid.get("isUpcoming"):
+                continue
+            item = normalize_video(vid)
+            if item:
+                clean.append(item)
+
+        print("MOST RECENT: after live-filter + normalize:", len(clean), "items", flush=True)
+
+        # backfills any remaining gaps in stats/author, same as before
+        clean = enrich_view_counts(clean)
+        print("MOST RECENT: after enrichment:", len(clean), "items", flush=True)
+        clean = [item for item in clean if not item.get("_is_live")]
+        print("MOST RECENT: after _is_live filter:", len(clean), "items", flush=True)
+
+        if url[-1] == '/':
+            url = url[:-1]
+
+        if "youtube/1.0.0" in user_agent or "youtube v1.0.0" in user_agent:
+            return get.template('classic/featured.jinja2', {
+                'data': clean[:15],
+                'unix': get.unix,
+                'url': url
+            })
+
+        return get.template('featured.jinja2', {
+            'data': clean[:15],
+            'unix': get.unix,
+            'url': url
+        })
     
     # print logs if enabled
     if config.SPYING == True:
@@ -863,7 +1602,7 @@ def search_videos(res=''):
             if not duration:
                 duration = 0
 
-            if vid.get("liveNow") or vid.get("isLive"):
+            if vid.get("type") == "livestream" or vid.get("liveNow") or vid.get("isLive"):
                 continue
 
             
@@ -919,6 +1658,9 @@ def search_videos(res=''):
     except Exception as e:
         print("INVIDIOUS SEARCH ERROR:", e)
         data = []
+
+    data = enrich_view_counts(data)
+
     # Templates have the / at the end, so let's remove it.
     if url[-1] == '/':
         url = url[:-1]
@@ -1006,12 +1748,18 @@ def thumbnail(video_id):
 @video.route("/getvideo/<video_id>")
 @video.route("/<int:res>/getvideo/<video_id>")
 def getvideo(video_id, res=None):
+    if video_id == "login_prompt":
+        return "This isn't a real video — check its description for the login link.", 200
+
     import subprocess
     import json
     import os
     import time
 
     t0 = time.time()
+    lock = _get_download_lock(video_id)
+    lock.acquire()
+    _download_semaphore.acquire()
 
     try:
         print("START GETVIDEO:", video_id)
@@ -1135,6 +1883,10 @@ def getvideo(video_id, res=None):
     except Exception as e:
         print("HYBRID ERROR:", e)
         return "Playback failed", 500
+
+    finally:
+        lock.release()
+        _download_semaphore.release()
 
 @video.route("/feeds/api/videos/<video_id>/related")
 @video.route("/<int:res>/feeds/api/videos/<video_id>/related")

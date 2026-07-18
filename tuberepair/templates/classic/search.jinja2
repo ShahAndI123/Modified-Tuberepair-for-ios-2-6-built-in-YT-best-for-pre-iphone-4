@@ -53,7 +53,7 @@
         <yt:accessControl action="autoPlay" permission="allowed" />
         <yt:accessControl action="syndicate" permission="allowed" />
         <gd:comments><gd:feedLink href="{{url}}/api/videos/{{info['videoId']}}/comments"/></gd:comments>
-        <yt:statistics favoriteCount="0" viewCount="{{info['viewCount']}}" />
+        <yt:statistics favoriteCount="0" viewCount="{{ [info['viewCount'], 2147483647] | min }}" />
     <gd:rating average="5" max="5" min="1" numRaters="8101" rel="http://schemas.google.com/g/2005#overall" />
         <yt:rating numDislikes="0" numLikes="8101" />
     <yt:hd />
