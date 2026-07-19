@@ -26,6 +26,7 @@
 			<category scheme='http://gdata.youtube.com/schemas/2007/categories.cat' term='Howto' label='Howto &amp; Style'/>
 			<title>{{video['title']}}</title>
 			<content type='application/x-shockwave-flash' src="https://www.youtube.com/v/{{video['videoId']}}?version=3&amp;f=playlists&amp;app=youtube_gvideo"/>
+			<summary type='text'>{{video['description']}}</summary>
 			<link rel='alternate' type='text/html' href="https://www.youtube.com/watch?v={{video['videoId']}}&amp;feature=youtube_gvideo"/>
 			<link rel='http://gdata.youtube.com/schemas/2007#video.related' type='application/atom+xml' href="{{url}}/feeds/api/videos/{{video['videoId']}}/related"/>
 			<link rel='http://gdata.youtube.com/schemas/2007#mobile' type='text/html' href="https://m.youtube.com/details?v={{video['videoId']}}"/>
@@ -56,7 +57,7 @@
 				<media:content url="{{url}}/{{video['videoId']}}.3gpp" type='video/3gpp' medium='video' expression='full' duration='0' yt:format='1'/>
 				<media:content url="{{url}}/{{video['videoId']}}.3gpp" type='video/3gpp' medium='video' expression='full' duration='0' yt:format='6'/>
 				<media:credit role='uploader' scheme='urn:youtube' yt:display="{{video['author']}}" yt:type='partner'>{{video['author']}}</media:credit>
-				<media:description type='plain'></media:description>
+				<media:description type='plain'>{{video['description']}}</media:description>
 				<media:keywords/>
 				<media:license type='text/html' href='https://www.youtube.com/t/terms'>youtube</media:license>
 				<media:player url="https://www.youtube.com/watch?v={{video['videoId']}}&amp;feature=youtube_gvideo_player"/>

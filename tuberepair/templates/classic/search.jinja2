@@ -26,6 +26,7 @@
         <category scheme="http://gdata.youtube.com/schemas/2007/categories.cat" term="Music" label="Music" />
         <title>{{info['title']}}</title>
         <content type="video/3gpp" src="{{url}}/video/sd/{{info['videoId']}}" />
+        <summary type="text">{{info['description']}}</summary>
         <link rel="alternate" type="text/html" href="https://www.youtube.com/watch?v={{info['videoId']}}&amp;feature=youtube_gdata" />
         <link rel="http://gdata.youtube.com/schemas/2007#video.complaints" type="application/atom+xml" href="{{url}}/feeds/api/videos/{{info['videoId']}}/complaints" />
         <link rel='http://gdata.youtube.com/schemas/2007#video.related' type='application/atom+xml' href="{{url}}/feeds/api/videos/{{info['videoId']}}/related"/>
@@ -62,7 +63,7 @@
           <media:content url="{{url}}/getvideo/{{info['videoId']}}" type="video/mp4" medium="video" expression="full" duration="{{info['lengthSeconds']}}" yt:format="8" />
           <media:content url="{{url}}/getvideo/{{info['videoId']}}" type="video/3gpp" medium="video" expression="full" duration="{{info['lengthSeconds']}}" yt:format="9" />
           <media:credit role="uploader" scheme="urn:youtube" yt:display="{{info['author']}}">{{info['author']}}</media:credit>
-          <media:description type="plain">By {{info['author']}} - {{info['title']}}</media:description>
+          <media:description type="plain">{{info['description']}}</media:description>
           <media:keywords></media:keywords>
           <media:license type="text/html" href="http://www.youtube.com/t/terms">youtube</media:license>
           <media:player url="{{url}}/getvideo/{{info['videoId']}}" />

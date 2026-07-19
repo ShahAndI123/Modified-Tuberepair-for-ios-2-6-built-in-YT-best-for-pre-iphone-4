@@ -143,6 +143,7 @@ def enrich_view_counts(items, max_workers=10):
             or not item.get("author") or item.get("author") in ("Unknown", "unknown")
             or not item.get("authorId") or item.get("authorId") == "unknown"
             or _looks_like_raw_id(item)
+            or not item.get("description")
         )
     ]
     print(f"ENRICH_VIEW_COUNTS: {len(items)} items total, {len(to_fetch)} need enrichment", flush=True)
@@ -182,6 +183,8 @@ def enrich_view_counts(items, max_workers=10):
                 item["author"] = cached["author"]
             if cached.get("authorId") and (not item.get("authorId") or item.get("authorId") == "unknown"):
                 item["authorId"] = cached["authorId"]
+            if cached.get("description") and not item.get("description"):
+                item["description"] = cached["description"]
             if cached.get("isLive"):
                 item["_is_live"] = True
         else:
@@ -206,6 +209,7 @@ def enrich_view_counts(items, max_workers=10):
                     published = int(stats.get("published") or 0)
                     real_author = stats.get("author") or ""
                     real_author_id = stats.get("authorId") or ""
+                    real_description = stats.get("description") or ""
 
                     if not item.get("viewCount"):
                         item["viewCount"] = view_count
@@ -217,6 +221,14 @@ def enrich_view_counts(items, max_workers=10):
                         item["author"] = html.escape(str(real_author))
                     if real_author_id and (not item.get("authorId") or item.get("authorId") == "unknown"):
                         item["authorId"] = str(real_author_id)
+                    if real_description and not item.get("description"):
+                        item["description"] = html.escape(str(real_description)[:1000])
+                    print(
+                        "DESCRIPTION ENRICH:", video_id,
+                        "| fetched len:", len(real_description),
+                        "| item now has len:", len(item.get("description") or ""),
+                        flush=True
+                    )
 
                     # write through to the persistent cache so every
                     # OTHER feed that ever shows this same video gets an
@@ -228,6 +240,7 @@ def enrich_view_counts(items, max_workers=10):
                             "published": published,
                             "author": real_author,
                             "authorId": real_author_id,
+                            "description": real_description[:1000],
                             "isLive": is_live,
                             "cachedAt": int(time.time()),
                         }
@@ -413,27 +426,42 @@ def build_login_prompt(req):
         "description": "Go to this URL on any device to create a login and link this one."
     }
 
-def space_safe_channel_name(name):
-    """Experimental workaround: the classic app appears to build its
-    'More Videos' (uploader uploads) request directly from the
-    displayed channel name rather than the authorId we provide (see
-    CHANNEL ROUTE HIT logs showing the raw name, e.g. 'Northernlion',
-    used as the URL path segment) — and that request seems to never
-    even get sent when the name contains a literal space (zero server
-    activity, works fine for single-word names).
+def log_description_debug(label, items):
+    """Diagnostic logging to trace where a description goes missing —
+    logs it right before a template renders, so we can tell whether the
+    data has a real description at the point it's handed to Jinja."""
+    for c in (items or [])[:15]:
+        desc = c.get("description") if isinstance(c, dict) else None
+        print(
+            f"{label} ABOUT TO RENDER:", c.get("videoId") if isinstance(c, dict) else "?",
+            "| description len:", len(desc or ""),
+            "| description preview:", repr((desc or "")[:80]),
+            flush=True
+        )
 
-    First tried substituting a non-breaking space (U+00A0) for the
-    regular space — no change, still zero server activity. Trying
-    literal '%20' text instead: if the app concatenates this string
-    directly into a URL without percent-encoding it itself, handing it
-    an already-encoded space might get through where a raw one didn't.
-    Trade-off: since this same field is also the displayed name, it
-    will show on screen as 'Warner%20Bros.%20and%20IMAX' rather than
-    with real spaces — ugly, but only worth keeping if it actually
-    fixes the request going out at all."""
+def space_safe_channel_name(name):
+    """Derives a handle-style identifier from a channel's display name,
+    e.g. 'Warner Bros. and IMAX' -> '@WarnerBros.andIMAX'.
+
+    Used everywhere a channel name is shown to the app, since the app
+    appears to build its 'More Videos' (uploader uploads) request
+    directly from whatever name is displayed, rather than using the
+    authorId we provide (confirmed via CHANNEL ROUTE HIT logs showing
+    the raw name used as the URL path segment) — and that request never
+    goes out at all when the name contains a literal space.
+
+    Previously tried substituting a non-breaking space (no change) and
+    literal '%20' text (worked, but displayed as ugly encoding garbage
+    like 'Warner%20Bros.%20and%20IMAX'). A derived handle sidesteps the
+    problem entirely — it never contains a space to begin with, so
+    there's nothing for the app's URL-building to trip on, while still
+    reading as a normal, clean-looking channel identifier."""
     if not name:
-        return name
-    return name.replace(" ", "%20")
+        return "@unknown"
+    cleaned = re.sub(r"[^A-Za-z0-9_.\-]", "", name)
+    if not cleaned:
+        cleaned = "channel"
+    return "@" + cleaned
 
 def normalize_video(vid):
     title = vid.get("title") or "Untitled"
@@ -472,6 +500,17 @@ def normalize_video(vid):
         if resolved_name:
             raw_author = resolved_name
 
+    raw_description = vid.get("description")
+    final_description = html.escape(str(raw_description or "")[:1000])
+    print(
+        "NORMALIZE_VIDEO DESCRIPTION:", video_id,
+        "| raw type:", type(raw_description).__name__,
+        "| raw len:", len(raw_description) if raw_description else 0,
+        "| raw preview:", repr(str(raw_description)[:80]) if raw_description else None,
+        "| final len:", len(final_description),
+        flush=True
+    )
+
     return {
         "title": html.escape(str(title)),
         "videoId": str(video_id),
@@ -487,7 +526,7 @@ def normalize_video(vid):
         "published": safe_published(
             vid.get("published") or vid.get("timestamp") or vid.get("publishedText")
         ),
-        "description": html.escape(str(vid.get("description") or "")[:120])
+        "description": final_description
     }
 
     print("RELATED VIDEO KEYS:", vid.keys())
@@ -516,7 +555,18 @@ def channel_uploads(channel):
                 })
 
         if not channel.startswith("UC"):
-            resolved = resolve_channel_id_for_credit(channel)
+            lookup_name = channel[1:] if channel.startswith("@") else channel
+            resolved = resolve_channel_id_for_credit(lookup_name)
+
+            if (not resolved or resolved == "unknown") and channel.startswith("@"):
+                # Our derived handle strips spaces entirely (e.g.
+                # "Warner Bros. and IMAX" -> "@WarnerBros.andIMAX"), so
+                # there's no word-boundary info left for the usual
+                # search-by-name lookup. Best-effort recovery: split back
+                # apart at lowercase->uppercase transitions and retry.
+                spaced_guess = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", lookup_name)
+                if spaced_guess != lookup_name:
+                    resolved = resolve_channel_id_for_credit(spaced_guess)
 
             if resolved and resolved != "unknown":
                 channel = resolved
@@ -587,6 +637,14 @@ def channel_uploads(channel):
                     or item.get("published")
                 )
                 clean.append(item)
+
+        for c in clean:
+            print(
+                "CHANNEL_UPLOADS ITEM ABOUT TO RENDER:", c.get("videoId"),
+                "| description len:", len(c.get("description") or ""),
+                "| description preview:", repr((c.get("description") or "")[:80]),
+                flush=True
+            )
 
         return get.template("uploads.jinja2", {
             "data": clean,
@@ -1128,7 +1186,7 @@ def get_videos_via_search(query, limit=15, sort_by=None, date=None):
             "viewCount": int(item.get("viewCount") or 0),
             "lengthSeconds": int(item.get("lengthSeconds") or 0),
             "published": int(item.get("published") or 0),
-            "description": html.escape((item.get("description") or "")[:120]),
+            "description": html.escape((item.get("description") or "")[:1000]),
         })
 
         if len(clean) >= limit:
@@ -1199,7 +1257,7 @@ def get_featured_from_hourly_playlists():
             "viewCount": view_count,
             "lengthSeconds": int(vid.get("lengthSeconds") or vid.get("duration") or 0),
             "published": int(vid.get("published") or vid.get("timestamp") or 0),
-            "description": html.escape((vid.get("description") or "")[:120])
+            "description": html.escape((vid.get("description") or "")[:1000])
         }
 
         item["authorId"] = (
@@ -1503,6 +1561,7 @@ def frontpage(regioncode="US", popular=None, res=''):
         random.shuffle(display_data)
 
         if "youtube/1.0.0" in user_agent or "youtube v1.0.0" in user_agent:
+            log_description_debug("FRONTPAGE(classic)", display_data[:15])
             return get.template('classic/featured.jinja2',{
                 'data': display_data[:15],
                 'unix': get.unix,
@@ -1629,6 +1688,7 @@ def most_viewed(res=''):
     data = data[offset:] + data[:offset]
 
     if "youtube/1.0.0" in user_agent or "youtube v1.0.0" in user_agent:
+        log_description_debug("MOST_VIEWED(classic)", data[:15])
         return get.template('classic/featured.jinja2', {
             'data': data[:15],
             'unix': get.unix,
@@ -1706,6 +1766,13 @@ def _handle_batch_request(res=''):
             clean.append(item)
 
     print("BATCH RESOLVED COUNT:", len(clean), flush=True)
+    for c in clean:
+        print(
+            "BATCH ITEM ABOUT TO RENDER:", c.get("videoId"),
+            "| description len:", len(c.get("description") or ""),
+            "| description preview:", repr((c.get("description") or "")[:80]),
+            flush=True
+        )
 
     return get.template("batch_videos.jinja2", {
         "data": clean,
@@ -1854,6 +1921,7 @@ def search_videos(res=''):
             url = url[:-1]
 
         if "youtube/1.0.0" in user_agent or "youtube v1.0.0" in user_agent:
+            log_description_debug("MOST_RECENT(classic)", clean[:15])
             return get.template('classic/featured.jinja2', {
                 'data': clean[:15],
                 'unix': get.unix,
@@ -2035,6 +2103,7 @@ def search_videos(res=''):
     if "youtube/1.0.0" in user_agent or "youtube v1.0.0" in user_agent:
         print("FINAL DATA COUNT:", len(data))
         print("IDS:", [x["videoId"] for x in data])
+        log_description_debug("SEARCH(classic)", data)
         return get.template('classic/search.jinja2',{
             'data': data,
             'unix': get.unix,
@@ -2478,7 +2547,7 @@ def get_suggested(video_id, res=''):
                 "viewCount": safe_int(vid.get("viewCount") or 0),
                 "lengthSeconds": safe_int(vid.get("lengthSeconds") or 0),
                 "published": safe_published(vid.get("published") or 0),
-                "description": html.escape(str(vid.get("description") or "")[:120])
+                "description": html.escape(str(vid.get("description") or "")[:1000])
             })
 
         data = data[:10]
@@ -2493,6 +2562,7 @@ def get_suggested(video_id, res=''):
     print("RELATED DATA SAMPLE:", data[:2])
 
     if "youtube/1.0.0" in user_agent or "youtube v1.0.0" in user_agent:
+        log_description_debug("RELATED(classic)", data)
         return get.template('classic/search.jinja2',{
             'data': data,
             'unix': get.unix,

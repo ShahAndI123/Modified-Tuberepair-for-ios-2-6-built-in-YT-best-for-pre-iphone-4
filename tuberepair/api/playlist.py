@@ -3,7 +3,7 @@ import config
 from modules import get, helpers
 from jinja2 import Environment, FileSystemLoader
 from api.login import extract_device_id, get_valid_access_token, get_logged_in_channel_id
-from api.video import normalize_video, get_channel_name_from_id, space_safe_channel_name
+from api.video import normalize_video, get_channel_name_from_id, space_safe_channel_name, resolve_channel_id_for_credit
 import xml.etree.ElementTree as ET
 import requests
 import html
@@ -99,7 +99,21 @@ def playlists(channel_id, res=''):
         })
 
     try:
-        data = get.fetch(f"{config.URL}/api/v1/channels/{channel_id}/playlists{continuationToken}")
+        resolved_channel_id = channel_id
+        if not resolved_channel_id.startswith("UC"):
+            import re as _re
+            lookup_name = resolved_channel_id[1:] if resolved_channel_id.startswith("@") else resolved_channel_id
+            resolved = resolve_channel_id_for_credit(lookup_name)
+            if (not resolved or resolved == "unknown") and resolved_channel_id.startswith("@"):
+                spaced_guess = _re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", lookup_name)
+                if spaced_guess != lookup_name:
+                    resolved = resolve_channel_id_for_credit(spaced_guess)
+            if resolved and resolved != "unknown":
+                resolved_channel_id = resolved
+            else:
+                return get.error()
+
+        data = get.fetch(f"{config.URL}/api/v1/channels/{resolved_channel_id}/playlists{continuationToken}")
 
         if data:
             playlists_clean = data.get('playlists', [])
