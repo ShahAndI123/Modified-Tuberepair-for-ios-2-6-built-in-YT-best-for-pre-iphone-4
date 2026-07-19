@@ -20,9 +20,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 video = Blueprint("video", __name__)
 
-featured_cache = {}
-featured_cache_time = {}
-
 # prevents multiple simultaneous requests for the same video from spawning
 # duplicate yt-dlp/ffmpeg pipelines in parallel
 _download_locks = {}
@@ -122,7 +119,7 @@ def safe_int(value):
 
     return 0
 
-def enrich_view_counts(items, max_workers=10):
+def enrich_view_counts(items, max_workers=10, force_refresh=False):
     """Fetch real stats (views, duration, published date, author/channel)
     for items missing them, concurrently instead of one-at-a-time —
     sequential per-item calls on a 20-30 item feed is what caused Top
@@ -130,7 +127,12 @@ def enrich_view_counts(items, max_workers=10):
     fragile client-side parse (e.g. InnerTube's tileRenderer for
     Subscriptions) couldn't resolve the channel — Invidious's per-video
     metadata reliably has both, so this doubles as channel ID -> name
-    translation wherever it's missing."""
+    translation wherever it's missing.
+
+    force_refresh=True skips the disk cache entirely and always fetches
+    live — used by Featured/Most Viewed/Top Rated so nothing in that
+    pipeline is ever served stale, matching the original tuberepair
+    tweak's always-fresh-reload behavior."""
     def _looks_like_raw_id(item):
         author = item.get("author") or ""
         return author.startswith("UC") and len(author) > 15
@@ -144,9 +146,10 @@ def enrich_view_counts(items, max_workers=10):
             or not item.get("authorId") or item.get("authorId") == "unknown"
             or _looks_like_raw_id(item)
             or not item.get("description")
+            or force_refresh
         )
     ]
-    print(f"ENRICH_VIEW_COUNTS: {len(items)} items total, {len(to_fetch)} need enrichment", flush=True)
+    print(f"ENRICH_VIEW_COUNTS: {len(items)} items total, {len(to_fetch)} need enrichment (force_refresh={force_refresh})", flush=True)
 
     # hard safety cap — 200 items needing enrichment (as seen on Most
     # Viewed) is what caused the timeout even with parallelization.
@@ -170,7 +173,7 @@ def enrich_view_counts(items, max_workers=10):
         # minutes ago in a different feed. This is almost certainly the
         # real cause of enrichment noticeably slowing things down.
         cached = metadata_cache.get(video_id) if video_id else None
-        cache_is_fresh = cached and (time.time() - cached.get("cachedAt", 0)) < 21600  # 6 hours
+        cache_is_fresh = (not force_refresh) and cached and (time.time() - cached.get("cachedAt", 0)) < 21600  # 6 hours
 
         if cache_is_fresh:
             if not item.get("viewCount"):
@@ -1280,10 +1283,10 @@ def get_featured_from_hourly_playlists():
 
         if len(data) >= 15:
             random.shuffle(data)
-            return enrich_view_counts(data)
+            return enrich_view_counts(data, force_refresh=True)
 
     random.shuffle(data)
-    return enrich_view_counts(data)
+    return enrich_view_counts(data, force_refresh=True)
 
 channel_id_cache = {}
 channel_name_cache = {}
@@ -1524,16 +1527,9 @@ def frontpage(regioncode="US", popular=None, res=''):
     else:
         data = get_featured_from_hourly_playlists()
 
-    if popular == "most_viewed" and data:
-        filtered = [item for item in data if item.get("viewCount", 0) < 1_500_000_000]
-        if filtered:
-            data = filtered
-
     print("POPULAR:", popular)
     
     import time, html
-
-    global featured_cache, featured_cache_time
 
     now = time.time()
     cache_key = f"{popular}_{regioncode}"
@@ -1633,21 +1629,7 @@ def get_most_viewed_from_playlist():
 
     random.shuffle(data)
     data = data[:15]
-    data = enrich_view_counts(data)
-
-    # keep this in the "millions" range rather than "viral mega-hit"
-    # territory — besides just being more varied/interesting, videos
-    # with multi-billion view counts cluster right up against (or over)
-    # the 32-bit signed int cap this old app's own view-count field can
-    # hold, which is why numbers looked suspiciously close to the limit.
-    # BUT don't let this filter empty the list entirely — an empty
-    # result makes frontpage() treat the whole request as failed (404),
-    # which is worse than showing a few mega-viral videos.
-    filtered = [item for item in data if item.get("viewCount", 0) < 1_500_000_000]
-    if filtered:
-        data = filtered
-    else:
-        print("MOST VIEWED: under-1B filter would empty the list, keeping unfiltered", flush=True)
+    data = enrich_view_counts(data, force_refresh=True)
 
     return data
 
@@ -1669,9 +1651,6 @@ def most_viewed(res=''):
     # frontpage() for why. Note this means the Today/This Week/All Time
     # tabs no longer filter anything here either.
     data = get_most_viewed_from_playlist()
-    filtered = [item for item in data if item.get("viewCount", 0) < 1_500_000_000]
-    if filtered:
-        data = filtered
 
     if url[-1] == '/':
         url = url[:-1]
@@ -1802,6 +1781,41 @@ def standardfeeds_batch(regioncode="US", popular=None, res=''):
     trigger for the forced sign-out. Handling it the same way as the
     History batch endpoint avoids that."""
     return _handle_batch_request(res)
+
+@video.route("/feeds/api/videos/<video_id>")
+@video.route("/<int:res>/feeds/api/videos/<video_id>")
+def single_video_info(video_id, res=''):
+    """Plain GET for one video's own info — no /related or /comments
+    suffix. The app hits this directly in some situations (relaunching
+    mid-video, reloading the Info tab) rather than going through the
+    /batch POST endpoint. Previously 404'd since only the suffixed
+    routes and the POST batch endpoint existed."""
+    if type(res) == int:
+        res = min(max(res, 144), config.RESMAX)
+
+    url = request.url_root + str(res)
+    if url[-1] == '/':
+        url = url[:-1]
+
+    data = get.fetch(f"{config.URL}/api/v1/videos/{video_id}")
+    if not data:
+        return get.error()
+
+    item = normalize_video(data)
+    if not item:
+        return get.error()
+
+    print(
+        "SINGLE_VIDEO_INFO ABOUT TO RENDER:", item.get("videoId"),
+        "| description len:", len(item.get("description") or ""),
+        flush=True
+    )
+
+    return get.template("batch_videos.jinja2", {
+        "data": [item],
+        "unix": get.unix,
+        "url": url,
+    })
 
 @video.route("/feeds/api/videos")
 @video.route("/feeds/api/videos/")
