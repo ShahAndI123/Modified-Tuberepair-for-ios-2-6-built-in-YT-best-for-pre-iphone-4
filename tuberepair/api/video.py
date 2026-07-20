@@ -119,7 +119,7 @@ def safe_int(value):
 
     return 0
 
-def enrich_view_counts(items, max_workers=10, force_refresh=False):
+def enrich_view_counts(items, max_workers=10, force_refresh=False, max_enrich=30):
     """Fetch real stats (views, duration, published date, author/channel)
     for items missing them, concurrently instead of one-at-a-time —
     sequential per-item calls on a 20-30 item feed is what caused Top
@@ -132,7 +132,12 @@ def enrich_view_counts(items, max_workers=10, force_refresh=False):
     force_refresh=True skips the disk cache entirely and always fetches
     live — used by Featured/Most Viewed/Top Rated so nothing in that
     pipeline is ever served stale, matching the original tuberepair
-    tweak's always-fresh-reload behavior."""
+    tweak's always-fresh-reload behavior.
+
+    max_enrich raises/lowers the hard cap below for callers that are
+    scoped narrowly enough (e.g. one channel's Shorts) that a higher
+    cap won't reintroduce the app-wide slowdown a low cap protects
+    against elsewhere."""
     def _looks_like_raw_id(item):
         author = item.get("author") or ""
         return author.startswith("UC") and len(author) > 15
@@ -154,7 +159,7 @@ def enrich_view_counts(items, max_workers=10, force_refresh=False):
     # Viewed) is what caused the timeout even with parallelization.
     # Anything beyond this just doesn't get enriched rather than
     # blocking the whole request.
-    MAX_ENRICH = 30
+    MAX_ENRICH = max_enrich
     if len(to_fetch) > MAX_ENRICH:
         print(f"ENRICH_VIEW_COUNTS: capping {len(to_fetch)} down to {MAX_ENRICH}", flush=True)
         to_fetch = to_fetch[:MAX_ENRICH]
@@ -210,11 +215,11 @@ def enrich_view_counts(items, max_workers=10, force_refresh=False):
                     real_author = stats.get("author") or ""
                     real_author_id = stats.get("authorId") or ""
 
-                    if not item.get("viewCount"):
+                    if force_refresh or not item.get("viewCount"):
                         item["viewCount"] = view_count
-                    if not item.get("lengthSeconds"):
+                    if force_refresh or not item.get("lengthSeconds"):
                         item["lengthSeconds"] = length_seconds
-                    if not item.get("published"):
+                    if force_refresh or not item.get("published"):
                         item["published"] = published
                     if real_author and (not item.get("author") or item.get("author") in ("Unknown", "unknown") or _looks_like_raw_id(item)):
                         item["author"] = html.escape(str(real_author))
@@ -582,16 +587,23 @@ def channel_uploads(channel):
         if shorts_data:
             shorts_videos = shorts_data.get("videos", [])
             print("CHANNEL_UPLOADS shorts found:", len(shorts_videos), flush=True)
-            # Invidious has a known bug where Shorts often come back with
-            # no duration at all (lengthSeconds 0/missing) — if the app
-            # treats a 0-duration entry as invalid/unplayable, that alone
-            # could make Shorts silently disappear even though they're
-            # right here in the data. Give them a reasonable placeholder
-            # (most Shorts are well under 60s) rather than leaving it 0.
+            for sv in shorts_videos:
+                sv["_is_short"] = True
+
+            # Invidious's /shorts listing is a lightweight endpoint that
+            # commonly comes back with missing/wrong duration and
+            # inaccurate published dates for each short — this pulls the
+            # real per-video data (same mechanism already used elsewhere,
+            # with its own caching) scoped to just this channel's shorts,
+            # not the whole app, so it doesn't repeat the earlier
+            # across-the-board performance issue.
+            shorts_videos = enrich_view_counts(shorts_videos, max_enrich=100, force_refresh=True)
+
+            # last-resort placeholder for anything still missing a
+            # duration even after the real per-video fetch above
             for sv in shorts_videos:
                 if not sv.get("lengthSeconds"):
                     sv["lengthSeconds"] = 30
-                sv["_is_short"] = True
 
             # A pure chronological merge+sort lets whichever type this
             # channel posts more/more-recently-of dominate entirely —
