@@ -103,6 +103,11 @@ def playlists(channel_id, res=''):
         if not resolved_channel_id.startswith("UC"):
             import re as _re
             lookup_name = resolved_channel_id[1:] if resolved_channel_id.startswith("@") else resolved_channel_id
+
+            if lookup_name.lower() in ("unknown", "channel", "unknownchannel"):
+                print("PLAYLISTS: placeholder name, not attempting resolution:", lookup_name, flush=True)
+                return get.error()
+
             resolved = resolve_channel_id_for_credit(lookup_name)
             if (not resolved or resolved == "unknown") and resolved_channel_id.startswith("@"):
                 spaced_guess = _re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", lookup_name)

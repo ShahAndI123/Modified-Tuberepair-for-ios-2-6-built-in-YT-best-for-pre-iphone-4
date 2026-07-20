@@ -145,7 +145,6 @@ def enrich_view_counts(items, max_workers=10, force_refresh=False):
             or not item.get("author") or item.get("author") in ("Unknown", "unknown")
             or not item.get("authorId") or item.get("authorId") == "unknown"
             or _looks_like_raw_id(item)
-            or not item.get("description")
             or force_refresh
         )
     ]
@@ -186,8 +185,6 @@ def enrich_view_counts(items, max_workers=10, force_refresh=False):
                 item["author"] = cached["author"]
             if cached.get("authorId") and (not item.get("authorId") or item.get("authorId") == "unknown"):
                 item["authorId"] = cached["authorId"]
-            if cached.get("description") and not item.get("description"):
-                item["description"] = cached["description"]
             if cached.get("isLive"):
                 item["_is_live"] = True
         else:
@@ -212,7 +209,6 @@ def enrich_view_counts(items, max_workers=10, force_refresh=False):
                     published = int(stats.get("published") or 0)
                     real_author = stats.get("author") or ""
                     real_author_id = stats.get("authorId") or ""
-                    real_description = stats.get("description") or ""
 
                     if not item.get("viewCount"):
                         item["viewCount"] = view_count
@@ -224,14 +220,6 @@ def enrich_view_counts(items, max_workers=10, force_refresh=False):
                         item["author"] = html.escape(str(real_author))
                     if real_author_id and (not item.get("authorId") or item.get("authorId") == "unknown"):
                         item["authorId"] = str(real_author_id)
-                    if real_description and not item.get("description"):
-                        item["description"] = html.escape(str(real_description)[:1000])
-                    print(
-                        "DESCRIPTION ENRICH:", video_id,
-                        "| fetched len:", len(real_description),
-                        "| item now has len:", len(item.get("description") or ""),
-                        flush=True
-                    )
 
                     # write through to the persistent cache so every
                     # OTHER feed that ever shows this same video gets an
@@ -243,7 +231,6 @@ def enrich_view_counts(items, max_workers=10, force_refresh=False):
                             "published": published,
                             "author": real_author,
                             "authorId": real_author_id,
-                            "description": real_description[:1000],
                             "isLive": is_live,
                             "cachedAt": int(time.time()),
                         }
@@ -429,22 +416,22 @@ def build_login_prompt(req):
         "description": "Go to this URL on any device to create a login and link this one."
     }
 
-def log_description_debug(label, items):
-    """Diagnostic logging to trace where a description goes missing —
-    logs it right before a template renders, so we can tell whether the
-    data has a real description at the point it's handed to Jinja."""
-    for c in (items or [])[:15]:
-        desc = c.get("description") if isinstance(c, dict) else None
-        print(
-            f"{label} ABOUT TO RENDER:", c.get("videoId") if isinstance(c, dict) else "?",
-            "| description len:", len(desc or ""),
-            "| description preview:", repr((desc or "")[:80]),
-            flush=True
-        )
+def primary_channel_name(name):
+    """For collab/compound credits like 'Warner Bros. and IMAX', just
+    use the first credited channel ('Warner Bros.') — a compound credit
+    isn't a real channel, so showing/resolving the whole string is more
+    confusing than useful. Splits on the same separators as
+    resolve_channel_id_for_credit so display and resolution agree."""
+    if not name:
+        return name
+    parts = re.split(r"\s+(?:and|&|x|with)\s+|,\s*", name, flags=re.IGNORECASE)
+    parts = [p.strip() for p in parts if p.strip()]
+    return parts[0] if parts else name
 
 def space_safe_channel_name(name):
     """Derives a handle-style identifier from a channel's display name,
-    e.g. 'Warner Bros. and IMAX' -> '@WarnerBros.andIMAX'.
+    e.g. 'Warner Bros. and IMAX' -> '@WarnerBros.' (primary channel
+    only — see primary_channel_name).
 
     Used everywhere a channel name is shown to the app, since the app
     appears to build its 'More Videos' (uploader uploads) request
@@ -459,8 +446,9 @@ def space_safe_channel_name(name):
     problem entirely — it never contains a space to begin with, so
     there's nothing for the app's URL-building to trip on, while still
     reading as a normal, clean-looking channel identifier."""
+    name = primary_channel_name(name)
     if not name:
-        return "@unknown"
+        return "Unknown"
     cleaned = re.sub(r"[^A-Za-z0-9_.\-]", "", name)
     if not cleaned:
         cleaned = "channel"
@@ -505,14 +493,6 @@ def normalize_video(vid):
 
     raw_description = vid.get("description")
     final_description = html.escape(str(raw_description or "")[:1000])
-    print(
-        "NORMALIZE_VIDEO DESCRIPTION:", video_id,
-        "| raw type:", type(raw_description).__name__,
-        "| raw len:", len(raw_description) if raw_description else 0,
-        "| raw preview:", repr(str(raw_description)[:80]) if raw_description else None,
-        "| final len:", len(final_description),
-        flush=True
-    )
 
     return {
         "title": html.escape(str(title)),
@@ -559,6 +539,11 @@ def channel_uploads(channel):
 
         if not channel.startswith("UC"):
             lookup_name = channel[1:] if channel.startswith("@") else channel
+
+            if lookup_name.lower() in ("unknown", "channel", "unknownchannel"):
+                print("CHANNEL_UPLOADS: placeholder name, not attempting resolution:", lookup_name, flush=True)
+                return get.error()
+
             resolved = resolve_channel_id_for_credit(lookup_name)
 
             if (not resolved or resolved == "unknown") and channel.startswith("@"):
@@ -585,6 +570,50 @@ def channel_uploads(channel):
 
         videos = data.get("videos", [])
 
+        # Invidious keeps Shorts on a completely separate endpoint from
+        # regular uploads (mirrors YouTube's own separate Shorts tab) —
+        # a plain /videos fetch silently excludes them entirely. Merge
+        # them in and re-sort by published date so they're properly
+        # interleaved with regular uploads by recency, not just
+        # tacked on at the end.
+        shorts_data = get.fetch(
+            f"{config.URL}/api/v1/channels/{channel}/shorts?sort_by=newest"
+        )
+        if shorts_data:
+            shorts_videos = shorts_data.get("videos", [])
+            print("CHANNEL_UPLOADS shorts found:", len(shorts_videos), flush=True)
+            # Invidious has a known bug where Shorts often come back with
+            # no duration at all (lengthSeconds 0/missing) — if the app
+            # treats a 0-duration entry as invalid/unplayable, that alone
+            # could make Shorts silently disappear even though they're
+            # right here in the data. Give them a reasonable placeholder
+            # (most Shorts are well under 60s) rather than leaving it 0.
+            for sv in shorts_videos:
+                if not sv.get("lengthSeconds"):
+                    sv["lengthSeconds"] = 30
+                sv["_is_short"] = True
+
+            # A pure chronological merge+sort lets whichever type this
+            # channel posts more/more-recently-of dominate entirely —
+            # confirmed: 108 merged items, 0 shorts made it into the
+            # first 25 because this channel's regular uploads all
+            # happened to be newer. Interleave instead (roughly 2
+            # regular videos per short) so both types are guaranteed to
+            # actually show up on the first page.
+            videos.sort(key=lambda v: v.get("published") or 0, reverse=True)
+            shorts_videos.sort(key=lambda v: v.get("published") or 0, reverse=True)
+            merged = []
+            vi, si = 0, 0
+            while vi < len(videos) or si < len(shorts_videos):
+                for _ in range(2):
+                    if vi < len(videos):
+                        merged.append(videos[vi])
+                        vi += 1
+                if si < len(shorts_videos):
+                    merged.append(shorts_videos[si])
+                    si += 1
+            videos = merged
+
         # honor GData's numeric start-index/max-results pagination by
         # slicing locally, since Invidious only gives us one page at a
         # time with no way to jump to an arbitrary numeric offset.
@@ -599,9 +628,18 @@ def channel_uploads(channel):
         except (TypeError, ValueError):
             max_results = 25
 
+        shorts_in_window = sum(1 for v in videos[start_index - 1: start_index - 1 + max_results] if v.get("_is_short"))
+        print(
+            "CHANNEL_UPLOADS pagination window:", start_index, "to", start_index - 1 + max_results,
+            "| shorts in this window:", shorts_in_window,
+            "| total merged pool:", len(videos),
+            flush=True
+        )
+
         videos = videos[start_index - 1: start_index - 1 + max_results]
 
         clean = []
+        shorts_survived = 0
 
         for vid in videos:
             if vid.get("type") == "parse-error":
@@ -609,16 +647,9 @@ def channel_uploads(channel):
 
             item = normalize_video(vid)
 
-            print(
-                "UPLOAD ITEM:",
-                item["title"],
-                item["viewCount"],
-                item["lengthSeconds"],
-                item["published"],
-                flush=True
-            )
-
             if item:
+                if vid.get("_is_short"):
+                    shorts_survived += 1
                 item["viewCount"] = safe_int(
                     vid.get("viewCount")
                     or vid.get("view_count")
@@ -641,13 +672,10 @@ def channel_uploads(channel):
                 )
                 clean.append(item)
 
-        for c in clean:
-            print(
-                "CHANNEL_UPLOADS ITEM ABOUT TO RENDER:", c.get("videoId"),
-                "| description len:", len(c.get("description") or ""),
-                "| description preview:", repr((c.get("description") or "")[:80]),
-                flush=True
-            )
+        print(
+            "CHANNEL_UPLOADS final render:", len(clean), "total items,",
+            shorts_survived, "of which are shorts", flush=True
+        )
 
         return get.template("uploads.jinja2", {
             "data": clean,
@@ -683,7 +711,7 @@ def subscriptions_list(channel):
     try:
         r = requests.get(
             "https://www.googleapis.com/youtube/v3/subscriptions",
-            params={"part": "snippet", "mine": "true", "maxResults": 25},
+            params={"part": "snippet", "mine": "true", "maxResults": 50},
             headers={"Authorization": f"Bearer {access_token}"},
             timeout=10,
         )
@@ -698,23 +726,23 @@ def subscriptions_list(channel):
 
     clean = []
     for it in items:
-        snippet = it.get("snippet", {})
+        snippet = it.get("snippet") or {}
         sub_id = it.get("id")
-        channel_id = snippet.get("resourceId", {}).get("channelId", "unknown")
-        thumbs = snippet.get("thumbnails", {})
+        channel_id = (snippet.get("resourceId") or {}).get("channelId") or "unknown"
+        thumbs = snippet.get("thumbnails") or {}
         thumb_url = (
-            thumbs.get("high", {}).get("url")
-            or thumbs.get("default", {}).get("url")
+            (thumbs.get("high") or {}).get("url")
+            or (thumbs.get("default") or {}).get("url")
             or ""
         )
         clean.append({
-            "title": html.escape(snippet.get("title", "Untitled")),
+            "title": html.escape(snippet.get("title") or "Untitled"),
             "subscriptionId": sub_id,
             "channelId": channel_id,
-            "author": html.escape(space_safe_channel_name(snippet.get("title", "Unknown"))),
+            "author": html.escape(space_safe_channel_name(snippet.get("title") or "Unknown")),
             "authorId": channel_id,
             "thumbnail": thumb_url,
-            "description": html.escape(snippet.get("description", "")[:500]),
+            "description": html.escape((snippet.get("description") or "")[:500]),
             "published": safe_published(snippet.get("publishedAt")),
         })
 
@@ -1069,7 +1097,11 @@ def personalized_feed_stub(channel):
                 # "no videos" even though nothing is actually broken.
                 fetch_limit = 60 if feed_name == "newsubscriptionvideos" else 15
                 data = fetch_personal_feed(access_token, browse_id, limit=fetch_limit)
-                data = enrich_view_counts(data)
+                # deliberately NOT running this through enrich_view_counts —
+                # that meant up to 60 extra per-video Invidious calls on
+                # every load of this feed, which is likely what was making
+                # it slow/crash-prone. YouTube's own internal feed response
+                # already includes viewCount/author/authorId directly.
             except Exception as e:
                 print("PERSONALIZED FEED ERROR:", feed_name, e, flush=True)
                 data = []
@@ -1410,22 +1442,23 @@ def resolve_channel_id_for_credit(name):
     Voice' — these aren't real single channels, so a direct name search
     for the whole string can fail (or land on an unrelated channel via
     the 'fallback first result' behavior in get_channel_id_from_name).
-    Try the full string first, then fall back to just the first credited
-    name, which is usually the actual uploader."""
+    Try the primary (first-credited) channel first, matching how
+    space_safe_channel_name simplifies collab credits for display —
+    falls back to the full string only if that doesn't resolve."""
     if not name:
         return "unknown"
 
-    resolved = get_channel_id_from_name(name)
+    primary = primary_channel_name(name)
+    resolved = get_channel_id_from_name(primary)
     if resolved and resolved != "unknown":
+        if primary != name:
+            print("CREDIT SIMPLIFIED:", repr(name), "->", primary, "->", resolved, flush=True)
         return resolved
 
-    parts = re.split(r"\s+(?:and|&|x|with)\s+|,\s*", name, flags=re.IGNORECASE)
-    parts = [p.strip() for p in parts if p.strip()]
-    if len(parts) > 1:
-        first_segment_resolved = get_channel_id_from_name(parts[0])
-        if first_segment_resolved and first_segment_resolved != "unknown":
-            print("CREDIT SPLIT RESOLVED:", repr(name), "->", parts[0], "->", first_segment_resolved, flush=True)
-            return first_segment_resolved
+    if primary != name:
+        resolved = get_channel_id_from_name(name)
+        if resolved and resolved != "unknown":
+            return resolved
 
     return "unknown"
 
@@ -1557,7 +1590,6 @@ def frontpage(regioncode="US", popular=None, res=''):
         random.shuffle(display_data)
 
         if "youtube/1.0.0" in user_agent or "youtube v1.0.0" in user_agent:
-            log_description_debug("FRONTPAGE(classic)", display_data[:15])
             return get.template('classic/featured.jinja2',{
                 'data': display_data[:15],
                 'unix': get.unix,
@@ -1667,7 +1699,6 @@ def most_viewed(res=''):
     data = data[offset:] + data[:offset]
 
     if "youtube/1.0.0" in user_agent or "youtube v1.0.0" in user_agent:
-        log_description_debug("MOST_VIEWED(classic)", data[:15])
         return get.template('classic/featured.jinja2', {
             'data': data[:15],
             'unix': get.unix,
@@ -1745,13 +1776,52 @@ def _handle_batch_request(res=''):
             clean.append(item)
 
     print("BATCH RESOLVED COUNT:", len(clean), flush=True)
-    for c in clean:
-        print(
-            "BATCH ITEM ABOUT TO RENDER:", c.get("videoId"),
-            "| description len:", len(c.get("description") or ""),
-            "| description preview:", repr((c.get("description") or "")[:80]),
-            flush=True
-        )
+
+    return get.template("batch_videos.jinja2", {
+        "data": clean,
+        "unix": get.unix,
+        "url": url,
+    })
+
+@video.route("/feeds/api/videos/batch", methods=["GET"])
+@video.route("/<int:res>/feeds/api/videos/batch", methods=["GET"])
+def videos_batch_get(res=''):
+    """Older app versions (iOS 3) appear to GET this same batch endpoint
+    directly instead of POSTing a body — previously a hard 404 since
+    only POST was registered here. We don't have a real capture of
+    exactly what query-param shape iOS 3 sends, so this tries several
+    common patterns (repeated ?id=, comma-separated ?ids=/?video_id=)
+    and logs the full raw query string either way, so if none of these
+    guesses match we can see exactly what to add next."""
+    if type(res) == int:
+        res = min(max(res, 144), config.RESMAX)
+    url = request.url_root + str(res)
+    if url[-1] == '/':
+        url = url[:-1]
+
+    print("VIDEOS_BATCH_GET query string:", request.query_string.decode('utf-8', 'ignore'), flush=True)
+    print("VIDEOS_BATCH_GET args:", dict(request.args), flush=True)
+
+    video_ids = list(request.args.getlist("id"))
+    for key in ("ids", "video_id", "videoIds", "videoid"):
+        val = request.args.get(key)
+        if val:
+            video_ids += [v.strip() for v in val.split(",") if v.strip()]
+
+    seen = set()
+    video_ids = [v for v in video_ids if not (v in seen or seen.add(v))]
+    print("VIDEOS_BATCH_GET resolved IDs:", video_ids, flush=True)
+
+    clean = []
+    for vid_id in video_ids:
+        data = get.fetch(f"{config.URL}/api/v1/videos/{vid_id}")
+        if not data:
+            continue
+        item = normalize_video(data)
+        if item:
+            clean.append(item)
+
+    print("VIDEOS_BATCH_GET resolved count:", len(clean), flush=True)
 
     return get.template("batch_videos.jinja2", {
         "data": clean,
@@ -1804,12 +1874,6 @@ def single_video_info(video_id, res=''):
     item = normalize_video(data)
     if not item:
         return get.error()
-
-    print(
-        "SINGLE_VIDEO_INFO ABOUT TO RENDER:", item.get("videoId"),
-        "| description len:", len(item.get("description") or ""),
-        flush=True
-    )
 
     return get.template("batch_videos.jinja2", {
         "data": [item],
@@ -1935,7 +1999,6 @@ def search_videos(res=''):
             url = url[:-1]
 
         if "youtube/1.0.0" in user_agent or "youtube v1.0.0" in user_agent:
-            log_description_debug("MOST_RECENT(classic)", clean[:15])
             return get.template('classic/featured.jinja2', {
                 'data': clean[:15],
                 'unix': get.unix,
@@ -2117,7 +2180,6 @@ def search_videos(res=''):
     if "youtube/1.0.0" in user_agent or "youtube v1.0.0" in user_agent:
         print("FINAL DATA COUNT:", len(data))
         print("IDS:", [x["videoId"] for x in data])
-        log_description_debug("SEARCH(classic)", data)
         return get.template('classic/search.jinja2',{
             'data': data,
             'unix': get.unix,
@@ -2576,7 +2638,6 @@ def get_suggested(video_id, res=''):
     print("RELATED DATA SAMPLE:", data[:2])
 
     if "youtube/1.0.0" in user_agent or "youtube v1.0.0" in user_agent:
-        log_description_debug("RELATED(classic)", data)
         return get.template('classic/search.jinja2',{
             'data': data,
             'unix': get.unix,
