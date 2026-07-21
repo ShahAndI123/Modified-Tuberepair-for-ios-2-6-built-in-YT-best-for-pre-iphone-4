@@ -401,6 +401,21 @@ def apply_cached_metadata(item):
 
     return item
 
+def build_empty_history_notice():
+    """Shown in place of a genuinely empty History list, so the app
+    displays something explaining why instead of just a blank screen —
+    same pattern as build_login_prompt."""
+    return {
+        "title": "No watch history yet",
+        "videoId": "empty_history_notice",
+        "author": "Server",
+        "authorId": "unknown",
+        "viewCount": 0,
+        "lengthSeconds": 0,
+        "published": int(time.time()),
+        "description": "Videos you watch will show up here once you've watched a few."
+    }
+
 def build_login_prompt(req):
     device_id = extract_device_id(req)
     linked = is_device_linked(device_id) or any_session_linked()
@@ -566,14 +581,61 @@ def channel_uploads(channel):
             else:
                 return get.error()
 
-        data = get.fetch(
-            f"{config.URL}/api/v1/channels/{channel}/videos?sort_by=newest"
+        # One lookup for the whole page — safe to do here (unlike in
+        # normalize_video/high-traffic multi-channel feeds) since every
+        # video on this page shares the same channel, so it's a single
+        # cached network call, not one per video.
+        real_handle = get_real_channel_handle(channel)
+
+        # honor GData's numeric start-index/max-results pagination —
+        # computed up front now so we know how many videos we actually
+        # need before deciding whether to fetch further pages.
+        try:
+            start_index = max(int(request.args.get("start-index", 1)), 1)
+        except (TypeError, ValueError):
+            start_index = 1
+        try:
+            max_results = max(int(request.args.get("max-results", 25)), 1)
+        except (TypeError, ValueError):
+            max_results = 25
+
+        needed = start_index - 1 + max_results
+
+        # Previously this only ever fetched a single page from Invidious
+        # and sliced locally — meaning "page 2" of a channel with more
+        # uploads than fit in one Invidious call always silently came
+        # back empty, telling the app to stop even though more videos
+        # genuinely existed. Now follows Invidious's own continuation
+        # token, fetching further pages until there's enough to cover
+        # the requested window (capped to avoid unbounded fetching on
+        # channels with huge upload counts).
+        videos = []
+        continuation = None
+        MAX_PAGE_FETCHES = 10
+        for _ in range(MAX_PAGE_FETCHES):
+            page_url = f"{config.URL}/api/v1/channels/{channel}/videos?sort_by=newest"
+            if continuation:
+                page_url += f"&continuation={continuation}"
+            data = get.fetch(page_url)
+            if not data:
+                break
+            batch = data.get("videos", [])
+            if not batch:
+                break
+            videos.extend(batch)
+            continuation = data.get("continuation")
+            if len(videos) >= needed or not continuation:
+                break
+
+        print(
+            "CHANNEL_UPLOADS regular videos fetched:", len(videos),
+            "| needed for this window:", needed,
+            "| more available:", bool(continuation),
+            flush=True
         )
 
-        if not data:
+        if not videos and not continuation:
             return get.error()
-
-        videos = data.get("videos", [])
 
         # Invidious keeps Shorts on a completely separate endpoint from
         # regular uploads (mirrors YouTube's own separate Shorts tab) —
@@ -626,20 +688,6 @@ def channel_uploads(channel):
                     si += 1
             videos = merged
 
-        # honor GData's numeric start-index/max-results pagination by
-        # slicing locally, since Invidious only gives us one page at a
-        # time with no way to jump to an arbitrary numeric offset.
-        # Returning an EMPTY page once we run out is what tells the
-        # classic app to stop requesting more pages instead of looping.
-        try:
-            start_index = max(int(request.args.get("start-index", 1)), 1)
-        except (TypeError, ValueError):
-            start_index = 1
-        try:
-            max_results = max(int(request.args.get("max-results", 25)), 1)
-        except (TypeError, ValueError):
-            max_results = 25
-
         shorts_in_window = sum(1 for v in videos[start_index - 1: start_index - 1 + max_results] if v.get("_is_short"))
         print(
             "CHANNEL_UPLOADS pagination window:", start_index, "to", start_index - 1 + max_results,
@@ -648,6 +696,7 @@ def channel_uploads(channel):
             flush=True
         )
 
+        has_more = len(videos) > needed or bool(continuation)
         videos = videos[start_index - 1: start_index - 1 + max_results]
 
         clean = []
@@ -684,6 +733,12 @@ def channel_uploads(channel):
                 )
                 clean.append(item)
 
+        if real_handle:
+            print("CHANNEL_UPLOADS applying real handle to all items:", real_handle, flush=True)
+            for item in clean:
+                item["author"] = html.escape(real_handle)
+                item["author_urlsafe"] = html.escape(real_handle)
+
         print(
             "CHANNEL_UPLOADS final render:", len(clean), "total items,",
             shorts_survived, "of which are shorts", flush=True
@@ -693,7 +748,8 @@ def channel_uploads(channel):
             "data": clean,
             "unix": get.unix,
             "url": request.url_root.rstrip("/"),
-            "continuation": data.get("continuation"),
+            "continuation": (str(start_index + max_results) if has_more else None),
+            "channel_id": channel,
         })
 
     except Exception as e:
@@ -1334,6 +1390,34 @@ def get_featured_from_hourly_playlists():
 
 channel_id_cache = {}
 channel_name_cache = {}
+channel_handle_cache = {}
+
+def get_real_channel_handle(channel_id):
+    """Attempts to get the channel's actual registered @handle (e.g.
+    '@memeguyonyt') rather than a derived one, via a live scrape of
+    YouTube's own channel page header — Invidious's API doesn't expose
+    real handles at all (authorUrl only ever gives /channel/UC...).
+
+    This is inherently more fragile than an API field (breaks if
+    YouTube changes their page markup, same risk the existing
+    subscriber-count scrape already carries) and is a real network
+    call, so it's cached per channel_id and any failure just returns
+    None so callers can fall back to the derived handle instead of
+    erroring."""
+    if not channel_id or not channel_id.startswith("UC"):
+        return None
+    if channel_id in channel_handle_cache:
+        return channel_handle_cache[channel_id]
+    try:
+        info = yt.metadata.simple_channel_info(channel_id)
+        handle = info.get("handle")
+        channel_handle_cache[channel_id] = handle
+        print("GET_REAL_CHANNEL_HANDLE:", channel_id, "->", handle, flush=True)
+        return handle
+    except Exception as e:
+        print("GET_REAL_CHANNEL_HANDLE ERROR:", channel_id, repr(e), flush=True)
+        channel_handle_cache[channel_id] = None
+        return None
 
 @video.route("/feeds/api/users/<channel>")
 @video.route("/feeds/api/users/<channel>/")
@@ -1789,6 +1873,9 @@ def _handle_batch_request(res=''):
 
     print("BATCH RESOLVED COUNT:", len(clean), flush=True)
 
+    if not clean:
+        clean = [build_empty_history_notice()]
+
     return get.template("batch_videos.jinja2", {
         "data": clean,
         "unix": get.unix,
@@ -1835,6 +1922,9 @@ def videos_batch_get(res=''):
 
     print("VIDEOS_BATCH_GET resolved count:", len(clean), flush=True)
 
+    if not clean:
+        clean = [build_empty_history_notice()]
+
     return get.template("batch_videos.jinja2", {
         "data": clean,
         "unix": get.unix,
@@ -1849,6 +1939,51 @@ def videos_batch(res=''):
     <feed> of <entry><id>...</id></entry> elements, expecting metadata
     for each back in one response."""
     return _handle_batch_request(res)
+
+@video.route("/feeds/api/standardfeeds/<regioncode>/<popular>/batch", methods=["GET"])
+@video.route("/feeds/api/standardfeeds/<popular>/batch", methods=["GET"])
+@video.route("/<int:res>/feeds/api/standardfeeds/<regioncode>/<popular>/batch", methods=["GET"])
+@video.route("/<int:res>/feeds/api/standardfeeds/<popular>/batch", methods=["GET"])
+def standardfeeds_batch_get(regioncode="US", popular=None, res=''):
+    """This same link is hardcoded into uploads.jinja2 (used by
+    Favorites, Channel Uploads, My Videos) as well as Featured — the app
+    appears to GET it a few seconds after those load, which previously
+    405'd since only POST was registered. Same query-param guessing
+    approach as videos_batch_get, since we don't have a real capture of
+    the exact shape this GET uses."""
+    if type(res) == int:
+        res = min(max(res, 144), config.RESMAX)
+    url = request.url_root + str(res)
+    if url[-1] == '/':
+        url = url[:-1]
+
+    print("STANDARDFEEDS_BATCH_GET query string:", request.query_string.decode('utf-8', 'ignore'), flush=True)
+    print("STANDARDFEEDS_BATCH_GET args:", dict(request.args), flush=True)
+
+    video_ids = list(request.args.getlist("id"))
+    for key in ("ids", "video_id", "videoIds", "videoid"):
+        val = request.args.get(key)
+        if val:
+            video_ids += [v.strip() for v in val.split(",") if v.strip()]
+
+    seen = set()
+    video_ids = [v for v in video_ids if not (v in seen or seen.add(v))]
+    print("STANDARDFEEDS_BATCH_GET resolved IDs:", video_ids, flush=True)
+
+    clean = []
+    for vid_id in video_ids:
+        data = get.fetch(f"{config.URL}/api/v1/videos/{vid_id}")
+        if not data:
+            continue
+        item = normalize_video(data)
+        if item:
+            clean.append(item)
+
+    return get.template("batch_videos.jinja2", {
+        "data": clean,
+        "unix": get.unix,
+        "url": url,
+    })
 
 @video.route("/feeds/api/standardfeeds/<regioncode>/<popular>/batch", methods=["POST"])
 @video.route("/feeds/api/standardfeeds/<popular>/batch", methods=["POST"])

@@ -73,22 +73,23 @@ def playlists(channel_id, res=''):
 
         clean = []
         for it in items:
-            snippet = it.get("snippet", {})
-            thumbs = snippet.get("thumbnails", {})
+            snippet = it.get("snippet") or {}
+            thumbs = snippet.get("thumbnails") or {}
             thumb_url = (
-                thumbs.get("high", {}).get("url")
-                or thumbs.get("default", {}).get("url")
+                (thumbs.get("high") or {}).get("url")
+                or (thumbs.get("default") or {}).get("url")
                 or ""
             )
+            content_details = it.get("contentDetails") or {}
             clean.append({
                 "type": "playlist",
-                "title": html.escape(snippet.get("title", "Untitled")),
+                "title": html.escape(snippet.get("title") or "Untitled"),
                 "playlistId": it.get("id"),
                 "playlistThumbnail": thumb_url,
-                "author": html.escape(space_safe_channel_name(snippet.get("channelTitle", "Unknown"))),
-                "authorId": snippet.get("channelId", "unknown"),
-                "descriptionHtml": html.escape(snippet.get("description", "")),
-                "videoCount": it.get("contentDetails", {}).get("itemCount", 0),
+                "author": html.escape(space_safe_channel_name(snippet.get("channelTitle") or "Unknown")),
+                "authorId": snippet.get("channelId") or "unknown",
+                "descriptionHtml": html.escape(snippet.get("description") or ""),
+                "videoCount": content_details.get("itemCount") or 0,
             })
 
         return get.template('channel_playlists.jinja2', {
