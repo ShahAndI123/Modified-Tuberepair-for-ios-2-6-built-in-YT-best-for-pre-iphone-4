@@ -814,6 +814,22 @@ def subscriptions_list(channel):
             "published": safe_published(snippet.get("publishedAt")),
         })
 
+    try:
+        start_index = max(int(request.args.get("start-index", 1)), 1)
+    except (TypeError, ValueError):
+        start_index = 1
+    try:
+        max_results = max(int(request.args.get("max-results", 25)), 1)
+    except (TypeError, ValueError):
+        max_results = 25
+
+    print(
+        "SUBSCRIPTIONS_LIST window requested:", start_index, "to", start_index - 1 + max_results,
+        "| total fetched:", len(clean),
+        flush=True
+    )
+    clean = clean[start_index - 1: start_index - 1 + max_results]
+
     return get.template("subscriptions.jinja2", {
         "data": clean,
         "unix": get.unix,
@@ -1156,14 +1172,12 @@ def personalized_feed_stub(channel):
         access_token = get_valid_access_token(device_id)
         if access_token:
             try:
-                # newsubscriptionvideos in particular needs a much bigger
-                # pool than 15 — if the app is filtering this same fetched
-                # list client-side per channel (rather than making a fresh
-                # request when you tap a subscription), then with dozens of
-                # subscribed channels, 15 total videos means most channels
-                # won't have a single video represented and will show as
-                # "no videos" even though nothing is actually broken.
-                fetch_limit = 60 if feed_name == "newsubscriptionvideos" else 15
+                # Previously bumped to 60 for newsubscriptionvideos so more
+                # subscribed channels would have a chance of being
+                # represented — but a larger fetched pool combined with
+                # not respecting max-results is a likely crash contributor
+                # on older clients. Back to 15 for a smaller, safer payload.
+                fetch_limit = 15
                 data = fetch_personal_feed(access_token, browse_id, limit=fetch_limit)
                 # deliberately NOT running this through enrich_view_counts —
                 # that meant up to 60 extra per-video Invidious calls on
@@ -1173,6 +1187,22 @@ def personalized_feed_stub(channel):
             except Exception as e:
                 print("PERSONALIZED FEED ERROR:", feed_name, e, flush=True)
                 data = []
+
+    try:
+        start_index = max(int(request.args.get("start-index", 1)), 1)
+    except (TypeError, ValueError):
+        start_index = 1
+    try:
+        max_results = max(int(request.args.get("max-results", 25)), 1)
+    except (TypeError, ValueError):
+        max_results = 25
+
+    print(
+        "PERSONALIZED FEED window requested:", start_index, "to", start_index - 1 + max_results,
+        "| total fetched:", len(data),
+        flush=True
+    )
+    data = data[start_index - 1: start_index - 1 + max_results]
 
     return get.template("uploads.jinja2", {
         "data": data,
