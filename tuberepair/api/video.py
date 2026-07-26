@@ -1934,6 +1934,9 @@ def videos_batch_get(res=''):
 
     print("VIDEOS_BATCH_GET query string:", request.query_string.decode('utf-8', 'ignore'), flush=True)
     print("VIDEOS_BATCH_GET args:", dict(request.args), flush=True)
+    print("VIDEOS_BATCH_GET full path:", request.full_path, flush=True)
+    print("VIDEOS_BATCH_GET headers:", dict(request.headers), flush=True)
+    print("VIDEOS_BATCH_GET raw body:", repr(request.get_data(as_text=True)[:500]), flush=True)
 
     video_ids = list(request.args.getlist("id"))
     for key in ("ids", "video_id", "videoIds", "videoid"):
@@ -1990,6 +1993,8 @@ def videos_batch(res=''):
     device_id = extract_device_id(request)
     access_token = get_valid_access_token(device_id)
     print("VIDEOS_BATCH(POST) device_id:", device_id, "| has_access_token:", bool(access_token), flush=True)
+    print("VIDEOS_BATCH(POST) full path:", request.full_path, flush=True)
+    print("VIDEOS_BATCH(POST) headers:", dict(request.headers), flush=True)
 
     try:
         body = request.get_data(as_text=True)
