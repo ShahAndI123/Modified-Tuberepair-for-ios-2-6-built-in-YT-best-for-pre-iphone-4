@@ -1915,18 +1915,22 @@ def _handle_batch_request(res=''):
 @video.route("/feeds/api/videos/batch", methods=["GET"])
 @video.route("/<int:res>/feeds/api/videos/batch", methods=["GET"])
 def videos_batch_get(res=''):
-    """Older app versions (iOS 3) appear to GET this same batch endpoint
-    directly instead of POSTing a body — previously a hard 404 since
-    only POST was registered here. We don't have a real capture of
-    exactly what query-param shape iOS 3 sends, so this tries several
-    common patterns (repeated ?id=, comma-separated ?ids=/?video_id=)
-    and logs the full raw query string either way, so if none of these
-    guesses match we can see exactly what to add next."""
+    """History (GET variant) — older app versions (iOS 3) appear to GET
+    this endpoint directly instead of POSTing a body, previously a hard
+    404 since only POST was registered. Dedicated function (not shared
+    with standardfeeds' batch handler) specifically so we can see
+    whether iOS 3 is even sending a recognizable device/token — if it
+    isn't, that's likely why History never resolves anything, since the
+    device the videos would belong to can't be identified at all."""
     if type(res) == int:
         res = min(max(res, 144), config.RESMAX)
     url = request.url_root + str(res)
     if url[-1] == '/':
         url = url[:-1]
+
+    device_id = extract_device_id(request)
+    access_token = get_valid_access_token(device_id)
+    print("VIDEOS_BATCH_GET device_id:", device_id, "| has_access_token:", bool(access_token), flush=True)
 
     print("VIDEOS_BATCH_GET query string:", request.query_string.decode('utf-8', 'ignore'), flush=True)
     print("VIDEOS_BATCH_GET args:", dict(request.args), flush=True)
@@ -1964,11 +1968,70 @@ def videos_batch_get(res=''):
 @video.route("/feeds/api/videos/batch", methods=["POST"])
 @video.route("/<int:res>/feeds/api/videos/batch", methods=["POST"])
 def videos_batch(res=''):
-    """GData batch query — used by History. The app keeps its own local
+    """History (POST variant) — dedicated function, not shared with
+    standardfeeds' generic batch handler. The app keeps its own local
     list of watched video IDs on-device and POSTs them here as a batch
     <feed> of <entry><id>...</id></entry> elements, expecting metadata
-    for each back in one response."""
-    return _handle_batch_request(res)
+    for each back in one response.
+
+    Logs device_id/access_token explicitly (this previously had no
+    token-checking at all, sharing _handle_batch_request with routes
+    that genuinely don't need it) — if iOS 3 isn't sending a
+    recognizable device/token here, that would explain History coming
+    back empty regardless of what video IDs it posts, since we can't
+    tell which linked account it belongs to."""
+    if type(res) == int:
+        res = min(max(res, 144), config.RESMAX)
+
+    url = request.url_root + str(res)
+    if url[-1] == '/':
+        url = url[:-1]
+
+    device_id = extract_device_id(request)
+    access_token = get_valid_access_token(device_id)
+    print("VIDEOS_BATCH(POST) device_id:", device_id, "| has_access_token:", bool(access_token), flush=True)
+
+    try:
+        body = request.get_data(as_text=True)
+        print("VIDEOS_BATCH(POST) raw body:", repr(body[:500]), flush=True)
+        root = ET.fromstring(body)
+    except Exception as e:
+        print("VIDEOS_BATCH(POST) PARSE ERROR:", e, flush=True)
+        return get.template("batch_videos.jinja2", {
+            "data": [build_empty_history_notice()],
+            "unix": get.unix,
+            "url": url,
+        })
+
+    ns = {"atom": "http://www.w3.org/2005/Atom"}
+
+    video_ids = []
+    for entry in root.findall("atom:entry", ns):
+        id_el = entry.find("atom:id", ns)
+        if id_el is not None and id_el.text:
+            video_ids.append(id_el.text.strip().rsplit("/", 1)[-1])
+
+    print("VIDEOS_BATCH(POST) video IDs:", video_ids, flush=True)
+
+    clean = []
+    for vid_id in video_ids:
+        data = get.fetch(f"{config.URL}/api/v1/videos/{vid_id}")
+        if not data:
+            continue
+        item = normalize_video(data)
+        if item:
+            clean.append(item)
+
+    print("VIDEOS_BATCH(POST) resolved count:", len(clean), flush=True)
+
+    if not clean:
+        clean = [build_empty_history_notice()]
+
+    return get.template("batch_videos.jinja2", {
+        "data": clean,
+        "unix": get.unix,
+        "url": url,
+    })
 
 @video.route("/feeds/api/standardfeeds/<regioncode>/<popular>/batch", methods=["GET"])
 @video.route("/feeds/api/standardfeeds/<popular>/batch", methods=["GET"])
