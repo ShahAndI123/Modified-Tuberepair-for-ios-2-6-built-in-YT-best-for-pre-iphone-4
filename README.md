@@ -35,6 +35,14 @@ Still confused on how to set it up? Here's a tutorial https://youtu.be/M25eJ0s6X
 - The video load time will depend on your CPU and internet speed. Avoid playing 24 hour or 100 hour videos because that will take very very very long to load and may take up storage. 
 - Youtube may be very slow if you have many videos downloading in the backend. If that happens, restart the server using Ctrl + C or restart your computer if your computer becomes slow. Also, remove any other videos in your static folder if they take up a lot of storage in the background or wait 10 minutes for them to be removed.
 
+### Future development
+- fully featured yt, including missing features, working for all ios
+- integrating/plugging ios 2 to tuberepair
+- integrating/plugging ios 1 to tuberepair
+- tuberepair setup with iphone/ipad instead of a computer
+- direct streaming, if possible
+  - if it does work, cydia repo or public instance tweak
+
 # Login feature
 Big shoutout to [iOS 4 Xclusive](https://github.com/newfuckingplayer) for integrating the login system with the login from [Linocln's tuberepair server](https://github.com/erievs/Lincoln/)
 
