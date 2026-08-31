@@ -11,11 +11,11 @@
   {% endif %}
   <author>
     <name>YouTube</name>
-    <uri></uri>
+    <uri>{{ url }}/feeds/api/users/default</uri>
   </author>
-<openSearch:totalResults>20</openSearch:totalResults>
-  <openSearch:itemsPerPage>25</openSearch:itemsPerPage>
-  <openSearch:startIndex>1</openSearch:startIndex>
+<openSearch:totalResults>{{ data | length }}</openSearch:totalResults>
+<openSearch:itemsPerPage>{{ data | length }}</openSearch:itemsPerPage>
+<openSearch:startIndex>1</openSearch:startIndex>
 
 {% if data %}
   {% for uploads in data %}

@@ -535,7 +535,6 @@ def normalize_video(vid):
     print("RELATED VIDEO KEYS:", vid.keys())
 
 @video.route("/feeds/api/users/<channel>/uploads")
-@video.route("/feeds/api/users/<channel>/playlists")
 def channel_uploads(channel):
     print("CHANNEL ROUTE HIT:", channel, flush=True)
 
@@ -1934,9 +1933,6 @@ def videos_batch_get(res=''):
 
     print("VIDEOS_BATCH_GET query string:", request.query_string.decode('utf-8', 'ignore'), flush=True)
     print("VIDEOS_BATCH_GET args:", dict(request.args), flush=True)
-    print("VIDEOS_BATCH_GET full path:", request.full_path, flush=True)
-    print("VIDEOS_BATCH_GET headers:", dict(request.headers), flush=True)
-    print("VIDEOS_BATCH_GET raw body:", repr(request.get_data(as_text=True)[:500]), flush=True)
 
     video_ids = list(request.args.getlist("id"))
     for key in ("ids", "video_id", "videoIds", "videoid"):
@@ -1958,6 +1954,20 @@ def videos_batch_get(res=''):
             clean.append(item)
 
     print("VIDEOS_BATCH_GET resolved count:", len(clean), flush=True)
+
+    # The client apparently never actually sends video IDs to resolve on
+    # this endpoint (confirmed: fully empty body/query args even when
+    # authenticated) — History needs to come from the account's real
+    # watch history instead, fetched directly via the same internal
+    # YouTube feed mechanism already used for Subscriptions
+    # (FEsubscriptions), just with the FEhistory browseId instead.
+    if not clean and access_token:
+        try:
+            history_data = fetch_personal_feed(access_token, "FEhistory", limit=25)
+            print("VIDEOS_BATCH_GET FEhistory fetched:", len(history_data), flush=True)
+            clean = history_data
+        except Exception as e:
+            print("VIDEOS_BATCH_GET FEhistory ERROR:", repr(e), flush=True)
 
     if not clean:
         clean = [build_empty_history_notice()]
@@ -1993,28 +2003,20 @@ def videos_batch(res=''):
     device_id = extract_device_id(request)
     access_token = get_valid_access_token(device_id)
     print("VIDEOS_BATCH(POST) device_id:", device_id, "| has_access_token:", bool(access_token), flush=True)
-    print("VIDEOS_BATCH(POST) full path:", request.full_path, flush=True)
-    print("VIDEOS_BATCH(POST) headers:", dict(request.headers), flush=True)
 
     try:
         body = request.get_data(as_text=True)
         print("VIDEOS_BATCH(POST) raw body:", repr(body[:500]), flush=True)
         root = ET.fromstring(body)
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        video_ids = []
+        for entry in root.findall("atom:entry", ns):
+            id_el = entry.find("atom:id", ns)
+            if id_el is not None and id_el.text:
+                video_ids.append(id_el.text.strip().rsplit("/", 1)[-1])
     except Exception as e:
-        print("VIDEOS_BATCH(POST) PARSE ERROR:", e, flush=True)
-        return get.template("batch_videos.jinja2", {
-            "data": [build_empty_history_notice()],
-            "unix": get.unix,
-            "url": url,
-        })
-
-    ns = {"atom": "http://www.w3.org/2005/Atom"}
-
-    video_ids = []
-    for entry in root.findall("atom:entry", ns):
-        id_el = entry.find("atom:id", ns)
-        if id_el is not None and id_el.text:
-            video_ids.append(id_el.text.strip().rsplit("/", 1)[-1])
+        print("VIDEOS_BATCH(POST) PARSE ERROR (likely an empty/non-XML body):", e, flush=True)
+        video_ids = []
 
     print("VIDEOS_BATCH(POST) video IDs:", video_ids, flush=True)
 
@@ -2028,6 +2030,17 @@ def videos_batch(res=''):
             clean.append(item)
 
     print("VIDEOS_BATCH(POST) resolved count:", len(clean), flush=True)
+
+    # Same as the GET variant: the client evidently doesn't reliably
+    # send video IDs to resolve here — fall back to the account's real
+    # watch history via YouTube's internal FEhistory feed.
+    if not clean and access_token:
+        try:
+            history_data = fetch_personal_feed(access_token, "FEhistory", limit=25)
+            print("VIDEOS_BATCH(POST) FEhistory fetched:", len(history_data), flush=True)
+            clean = history_data
+        except Exception as e:
+            print("VIDEOS_BATCH(POST) FEhistory ERROR:", repr(e), flush=True)
 
     if not clean:
         clean = [build_empty_history_notice()]
