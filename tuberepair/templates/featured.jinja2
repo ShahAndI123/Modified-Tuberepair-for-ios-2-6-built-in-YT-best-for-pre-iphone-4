@@ -4,10 +4,10 @@
 	xmlns:media='http://search.yahoo.com/mrss/'
 	xmlns:openSearch='http://a9.com/-/spec/opensearch/1.1/'
 	xmlns:gd='http://schemas.google.com/g/2005'
-	xmlns:yt='{{url}}/schemas/1970' gd:etag='W/&quot;D0UHSX47eCp7I2A9WhJWF08.&quot;'>
+	xmlns:yt='http://gdata.youtube.com/schemas/2007' gd:etag='W/&quot;D0UHSX47eCp7I2A9WhJWF08.&quot;'>
 	<id>tag:youtube.com,2008:playlist:8E2186857EE27746</id>
 	<updated>2012-08-23T12:33:58.000Z</updated>
-	<category scheme='http://schemas.google.com/g/2005#kind' term='{{url}}/schemas/1970#playlist'/>
+	<category scheme='http://schemas.google.com/g/2005#kind' term='http://gdata.youtube.com/schemas/2007#playlist'/>
 	<title></title>
 	<subtitle></subtitle>
 	<logo>http://www.gstatic.com/youtube/img/logo.png</logo>
@@ -31,22 +31,22 @@
 		<id>tag:youtube.com,2008:playlist:{{video['videoId']}}:{{video['videoId']}}</id>
 		<published>{{ unix(video['published']) }}</published>
 		<updated>{{ unix(video['published']) }}</updated>
-		<category scheme='http://schemas.google.com/g/2005#kind' term='{{url}}/schemas/1970#video'/>
-		<category scheme='{{url}}/schemas/1970/categories.cat' term='Howto' label='Howto &amp; Style'/>
+		<category scheme='http://schemas.google.com/g/2005#kind' term='http://gdata.youtube.com/schemas/2007#video'/>
+		<category scheme='http://gdata.youtube.com/schemas/2007/categories.cat' term='Howto' label='Howto &amp; Style'/>
 		<title>{{video['title']}}</title>
 		<content type='application/x-shockwave-flash' src=''/>
 		<link rel='alternate' type='text/html' href="http://www.youtube.com/watch?v={{video['videoId']}}&amp;feature=youtube_gdata"/>
 		<link rel='http://gdata.youtube.com/schemas/2007#video.related' type='application/atom+xml' href="{{url}}/feeds/api/videos/{{video['videoId']}}/related"/>
-		<link rel='{{url}}/schemas/1970#mobile' type='text/html' href="http://m.youtube.com/details?v={{video['videoId']}}"/>
+		<link rel='http://gdata.youtube.com/schemas/2007#mobile' type='text/html' href="http://m.youtube.com/details?v={{video['videoId']}}"/>
 		{% if video['authorId'] != "unknown" and video['authorId'] != "Unknown" %}
-		<link rel='{{url}}/schemas/1970#uploader' type='application/atom+xml' href="{{url}}/feeds/api/users/{{video['authorId']}}/uploads?v=2"/>
+		<link rel='http://gdata.youtube.com/schemas/2007#uploader' type='application/atom+xml' href="{{url}}/feeds/api/users/{{video['authorId']}}/uploads?v=2"/>
 		{% endif %}
-		<link rel="{{url}}/schemas/2007#related" type="application/atom+xml" href="{{url}}/feeds/api/videos/{{video['videoId']}}/related" />
+		<link rel="http://gdata.youtube.com/schemas/2007#related" type="application/atom+xml" href="{{url}}/feeds/api/videos/{{video['videoId']}}/related" />
 		<link rel='related' type='application/atom+xml' href="{{url}}/feeds/api/videos/{{video['videoId']}}?v=2"/>
 		<link rel='self' type='application/atom+xml' href='{{url}}/feeds/api/playlists/8E2186857EE27746/PLyl9mKRbpNIpJC5B8qpcgKX8v8NI62Jho?v=2'/>
 		<author>
 			<name>{{video['author']}}</name>
-			<uri>{{url}}/</uri>
+			<uri>{{url}}/feeds/api/users/{{video['authorId']}}</uri>
 			<yt:userId>{{video['authorId']}}</yt:userId>
 		</author>
 		<yt:accessControl action='comment' permission='allowed'/>
@@ -58,17 +58,17 @@
 		<yt:accessControl action='autoPlay' permission='allowed'/>
 		<yt:accessControl action='syndicate' permission='allowed'/>
 		<gd:comments>
-			<gd:feedLink rel='{{url}}/schemas/1970#comments' href="{{url}}/api/videos/{{video['videoId']}}/comments?v=2" countHint='5'/>
+			<gd:feedLink rel='http://gdata.youtube.com/schemas/2007#comments' href="{{url}}/api/videos/{{video['videoId']}}/comments?v=2" countHint='5'/>
 		</gd:comments>
 		<gd:related>
-			<gd:feedLink rel='{{url}}/schemas/1970#related' href="{{url}}/feeds/api/videos/{{video['videoId']}}/related" countHint='5'/>
+			<gd:feedLink rel='http://gdata.youtube.com/schemas/2007#related' href="{{url}}/feeds/api/videos/{{video['videoId']}}/related" countHint='5'/>
 		</gd:related>
 		<yt:location></yt:location>
 		<media:group>
-			<media:category label='Howto &amp; Style' scheme='{{url}}/schemas/1970/categories.cat'>Howto</media:category>
+			<media:category label='Howto &amp; Style' scheme='http://gdata.youtube.com/schemas/2007/categories.cat'>Howto</media:category>
 			<media:thumbnail url="http://i.ytimg.com/vi/{{video['videoId']}}/default.jpg" height="90" width="120"/>
 			<media:content url="{{url}}/getvideo/{{video['videoId']}}" type="video/3gpp" medium="video" isDefault="true" expression="full" duration="0" yt:format="1"/>
-			<media:credit role='uploader' scheme='urn:youtube' yt:display='{{video['author']}}' yt:type='partner'>{{video['authorId']}}</media:credit>
+			<media:credit role='uploader' scheme='urn:youtube' yt:display='{{video['author']}}' yt:type='partner'>{{video['author']}}</media:credit>
 			<media:description type='plain'>{{video['description']}}</media:description>
 			<media:keywords/>
 			<media:license type='text/html' href='http://www.youtube.com/t/terms'>youtube</media:license>
@@ -80,7 +80,7 @@
 		</media:group>
 		<gd:rating average='0' max='0' min='0' numRaters='0' rel='https://schemas.google.com/g/2005#overall'/>
 		<yt:recorded>1970-08-22</yt:recorded>
-		<yt:statistics favoriteCount='0' viewCount="{{video['viewCount']}}"/>
+		<yt:statistics favoriteCount='0' viewCount="{{ [video['viewCount'], 2147483647] | min }}"/>
 		<yt:rating numDislikes='0' numLikes='0'/>
 		<yt:position>1</yt:position>
 	</entry>

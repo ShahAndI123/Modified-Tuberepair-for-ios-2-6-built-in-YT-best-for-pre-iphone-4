@@ -156,10 +156,25 @@ class metadata:
             subs = get.subscribers(data['header']['pageHeaderRenderer']['content']['pageHeaderViewModel']['metadata']['contentMetadataViewModel']['metadataRows'][1]['metadataParts'][0]['text']['content'])
         except:
             subs = -1
+
+        # On a real channel page the @handle is normally the first
+        # metadata row (row [1] above is subscriber count) — try to
+        # pull it out too. This is a live scrape of YouTube's own page
+        # structure, same fragility as the subscriber count above: it
+        # can break if YouTube changes this markup, so it's wrapped
+        # defensively and callers should treat a miss as "unavailable",
+        # not an error.
+        try:
+            handle_text = data['header']['pageHeaderRenderer']['content']['pageHeaderViewModel']['metadata']['contentMetadataViewModel']['metadataRows'][0]['metadataParts'][0]['text']['content']
+            handle = handle_text if handle_text.startswith("@") else None
+        except:
+            handle = None
+
         # i'm lazy. again.
         return {
             "name": data['header']['pageHeaderRenderer']['pageTitle'],
             "channel_id": data['contents']['twoColumnBrowseResultsRenderer']['tabs'][0]['tabRenderer']['endpoint']['browseEndpoint']['browseId'],
             "profile_picture": data['header']['pageHeaderRenderer']['content']['pageHeaderViewModel']['image']['decoratedAvatarViewModel']['avatar']['avatarViewModel']['image']['sources'][0]['url'],
-            "subscribers": subs
+            "subscribers": subs,
+            "handle": handle
         }

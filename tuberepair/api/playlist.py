@@ -3,7 +3,7 @@ import config
 from modules import get, helpers
 from jinja2 import Environment, FileSystemLoader
 from api.login import extract_device_id, get_valid_access_token, get_logged_in_channel_id
-from api.video import normalize_video
+from api.video import normalize_video, get_channel_name_from_id, space_safe_channel_name, resolve_channel_id_for_credit
 import xml.etree.ElementTree as ET
 import requests
 import html
@@ -54,7 +54,7 @@ def playlists(channel_id, res=''):
         try:
             r = requests.get(
                 "https://www.googleapis.com/youtube/v3/playlists",
-                params={"part": "snippet,contentDetails", "mine": "true", "maxResults": 25},
+                params={"part": "snippet,contentDetails", "mine": "true", "maxResults": 50},
                 headers={"Authorization": f"Bearer {access_token}"},
                 timeout=10,
             )
@@ -64,7 +64,10 @@ def playlists(channel_id, res=''):
                 return get.template('channel_playlists.jinja2', {
                     'data': [], 'continuation': None, 'url': url, 'channel_id': channel_id
                 })
+
+            
             items = r.json().get("items", [])
+
         except Exception as e:
             print("PLAYLISTS (mine=true) ERROR:", repr(e), flush=True)
             return get.template('channel_playlists.jinja2', {
@@ -73,37 +76,72 @@ def playlists(channel_id, res=''):
 
         clean = []
         for it in items:
-            snippet = it.get("snippet", {})
-            thumbs = snippet.get("thumbnails", {})
+            snippet = it.get("snippet") or {}
+            thumbs = snippet.get("thumbnails") or {}
             thumb_url = (
-                thumbs.get("high", {}).get("url")
-                or thumbs.get("default", {}).get("url")
+                (thumbs.get("high") or {}).get("url")
+                or (thumbs.get("default") or {}).get("url")
                 or ""
             )
+            
+            content_details = it.get("contentDetails") or {}
             clean.append({
                 "type": "playlist",
-                "title": html.escape(snippet.get("title", "Untitled")),
-                "playlistId": it.get("id"),
-                "playlistThumbnail": thumb_url,
-                "author": html.escape(snippet.get("channelTitle", "Unknown")),
-                "authorId": snippet.get("channelId", "unknown"),
-                "descriptionHtml": html.escape(snippet.get("description", "")),
-                "videoCount": it.get("contentDetails", {}).get("itemCount", 0),
+                "title": html.escape(str(snippet.get("title") or "Untitled")),
+                "playlistId": str(it.get("id") or ""),
+                "playlistThumbnail": str(thumb_url or ""),
+                "author": html.escape(
+                    str(space_safe_channel_name(
+                        snippet.get("channelTitle") or "Unknown"
+                    ))
+                ),
+                "authorId": str(snippet.get("channelId") or "unknown"),
+                "description": html.escape(
+                    str(snippet.get("description") or "")
+                ),
+                "videoCount": int(content_details.get("itemCount") or 0),
             })
 
-        return get.template('channel_playlists.jinja2', {
-            'data': clean,
-            'continuation': None,
-            'url': url,
-            'channel_id': channel_id
+        return get.template("channel_playlists.jinja2", {
+            "data": clean,
+            "continuation": None,
+            "url": url,
+            "channel_id": channel_id,
         })
 
     try:
-        data = get.fetch(f"{config.URL}/api/v1/channels/{channel_id}/playlists{continuationToken}")
+        resolved_channel_id = channel_id
+        if not resolved_channel_id.startswith("UC"):
+            import re as _re
+            lookup_name = resolved_channel_id[1:] if resolved_channel_id.startswith("@") else resolved_channel_id
+
+            if lookup_name.lower() in ("unknown", "channel", "unknownchannel"):
+                print("PLAYLISTS: placeholder name, not attempting resolution:", lookup_name, flush=True)
+                return get.error()
+
+            resolved = resolve_channel_id_for_credit(lookup_name)
+            if (not resolved or resolved == "unknown") and resolved_channel_id.startswith("@"):
+                spaced_guess = _re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", lookup_name)
+                if spaced_guess != lookup_name:
+                    resolved = resolve_channel_id_for_credit(spaced_guess)
+            if resolved and resolved != "unknown":
+                resolved_channel_id = resolved
+            else:
+                return get.error()
+
+        data = get.fetch(f"{config.URL}/api/v1/channels/{resolved_channel_id}/playlists{continuationToken}")
 
         if data:
+            playlists_clean = data.get('playlists', [])
+            for pl in playlists_clean:
+                author = str(pl.get("author") or "")
+                if author.startswith("UC") and len(author) > 15:
+                    resolved = get_channel_name_from_id(pl.get("authorId") or author)
+                    if resolved:
+                        pl["author"] = space_safe_channel_name(resolved)
+
             return get.template('channel_playlists.jinja2',{
-                'data': data['playlists'],
+                'data': playlists_clean,
                 'continuation': 'continuation' in data and data['continuation'] or None,
                 'url': url,
                 'channel_id': channel_id
@@ -182,52 +220,176 @@ def add_video_to_playlist(playlist_id, res=''):
 
 @playlist.route("/feeds/api/playlists/<playlist_id>")
 @playlist.route("/<int:res>/feeds/api/playlists/<playlist_id>")
-def playlists_video(playlist_id, res=''):
-    
-    max_results = request.args.get('max-results')
-    # TODO: Find out what it wants when this happens.
-    # This happens on YouTube 2.0.0, when you load a video from the playlist it add this
-    # for the playlist queue
-    if max_results and max_results == '0':
+def playlists_video(playlist_id, res=""):
+
+    max_results = request.args.get("max-results")
+
+    if max_results == "0":
         return get.error()
-    if playlist_id.strip().lower() == '(null)':
+
+    if playlist_id.strip().lower() == "(null)":
         return get.error()
-    # Clamp Res
-    if type(res) == int:
+
+    # Clamp resolution
+    if isinstance(res, int):
         res = min(max(res, 144), config.RESMAX)
 
-    currentPage, next_page = helpers.process_start_index(request)
+    current_page, next_page = helpers.process_start_index(request)
 
-    query = f'page={currentPage}'
-
-    # Santize and stitch 
-    query = query.replace('&', '&amp;')
-    
     url = request.url_root + str(res)
-    data = get.fetch(f"{config.URL}/api/v1/playlists/{playlist_id}?{query}")
-    
-    # Templates have the / at the end, so let's remove it.
-    if url[-1] == '/':
+    if url.endswith("/"):
         url = url[:-1]
 
+    data = None
+
+    # Try the authenticated YouTube API first.
+    device_id = extract_device_id(request)
+    access_token = get_valid_access_token(device_id)
+
+    if access_token:
+        try:
+            r = requests.get(
+                "https://www.googleapis.com/youtube/v3/playlistItems",
+                params={
+                    "part": "snippet,contentDetails",
+                    "playlistId": playlist_id,
+                    "maxResults": 25,
+                },
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                },
+                timeout=10,
+            )
+
+            print(
+                "PLAYLIST ITEMS status:",
+                r.status_code,
+                flush=True,
+            )
+
+            if not r.ok:
+                print(
+                    "PLAYLIST ITEMS error:",
+                    r.text[:1000],
+                    flush=True,
+                )
+            else:
+                api_items = r.json().get("items", [])
+                converted_videos = []
+
+                for api_item in api_items:
+                    snippet = api_item.get("snippet") or {}
+                    content_details = api_item.get("contentDetails") or {}
+
+                    resource_id = snippet.get("resourceId") or {}
+
+                    video_id = (
+                        content_details.get("videoId")
+                        or resource_id.get("videoId")
+                        or ""
+                    )
+
+                    if not video_id:
+                        continue
+
+                    thumbnails = snippet.get("thumbnails") or {}
+                    video_thumbnails = []
+
+                    for quality, thumbnail in thumbnails.items():
+                        thumbnail_url = thumbnail.get("url")
+
+                        if not thumbnail_url:
+                            continue
+
+                        video_thumbnails.append({
+                            "quality": quality,
+                            "url": thumbnail_url,
+                            "width": int(thumbnail.get("width") or 0),
+                            "height": int(thumbnail.get("height") or 0),
+                        })
+
+                    converted_videos.append({
+                        "type": "video",
+                        "videoId": video_id,
+                        "title": snippet.get("title") or "Untitled",
+                        "description": snippet.get("description") or "",
+                        "author": (
+                            snippet.get("videoOwnerChannelTitle")
+                            or snippet.get("channelTitle")
+                            or "Unknown"
+                        ),
+                        "authorId": (
+                            snippet.get("videoOwnerChannelId")
+                            or snippet.get("channelId")
+                            or "unknown"
+                        ),
+                        "videoThumbnails": video_thumbnails,
+                        "lengthSeconds": 0,
+                        "viewCount": 0,
+                        "published": 0,
+                    })
+
+                data = {
+                    "videos": converted_videos,
+                }
+
+                # Pagination can be added later using nextPageToken.
+                next_page = None
+
+                print(
+                    "AUTHENTICATED PLAYLIST VIDEOS:",
+                    len(converted_videos),
+                    flush=True,
+                )
+
+        except Exception as e:
+            print(
+                "PLAYLIST ITEMS API ERROR:",
+                repr(e),
+                flush=True,
+            )
+
+    # Fall back to Invidious when authentication/API retrieval failed.
+    if data is None:
+        query = f"page={current_page}"
+
+        data = get.fetch(
+            f"{config.URL}/api/v1/playlists/{playlist_id}?{query}"
+        )
+
     if not data:
-        next_page = None
+        return get.error()
 
-    if data:
-        clean = []
-        for vid in data['videos']:
-            item = normalize_video(vid)
-            if item:
-                clean.append(item)
+    videos = data.get("videos", [])
 
-        return get.template('playlist_videos.jinja2',{
-            'data': clean,
-            'unix': get.unix,
-            'url': url,
-            'next_page': next_page
-        })
-    
-    return get.error()
+    if not videos:
+        print(
+            "PLAYLIST HAS NO VIDEOS:",
+            repr(data),
+            flush=True,
+        )
+
+    clean = []
+
+    for video in videos:
+        item = normalize_video(video)
+
+        if item:
+            clean.append(item)
+
+    print(
+        "PLAYLIST VIDEO DATA:",
+        repr(data),
+        flush=True,
+    )
+
+    return get.template("playlist_videos.jinja2", {
+        "data": clean,
+        "unix": get.unix,
+        "url": url,
+        "next_page": next_page,
+        "playlist_id": playlist_id,
+    })
 
 # Playlist search (v2.0.0)
 @playlist.route("/feeds/api/playlists/snippets")

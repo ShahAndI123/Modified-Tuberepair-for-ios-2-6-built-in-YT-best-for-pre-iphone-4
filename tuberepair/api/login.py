@@ -116,6 +116,10 @@ def any_session_linked():
 # -------------------- device id extraction -------------------- #
 
 def extract_device_id(req):
+    print("EXTRACT_DEVICE_ID PATH:", req.path, flush=True)
+    print("EXTRACT_DEVICE_ID QUERY:", dict(req.args), flush=True)
+    print("EXTRACT_DEVICE_ID FORM:", dict(req.form), flush=True)
+    print("EXTRACT_DEVICE_ID HEADERS:", dict(req.headers), flush=True)
     device_id = req.args.get("device_id")
     if device_id:
         return device_id

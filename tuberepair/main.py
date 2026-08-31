@@ -22,6 +22,7 @@ if config.CLIENT_TEST:
 logs.version(config.VERSION)
 app = Flask(__name__)
 
+
 # register seperate paths
 app.register_blueprint(static)
 app.register_blueprint(playlist)
