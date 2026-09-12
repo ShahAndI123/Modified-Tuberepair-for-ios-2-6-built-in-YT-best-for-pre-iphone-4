@@ -1,5 +1,7 @@
 ## THE PROJECT IS STILL IN DEVELOPEMENT. YOU MAY EXPECT BUGS AND ISSUES
 
+## PLEASE ABIDE BY LICENSING TERMS AND CONDITIONS BEFORE PROCEEDING WITH THE PROJECT
+
 # Setting it up
 
 ### INSTALL:
@@ -28,8 +30,6 @@ Still confused on how to set it up? Here's a tutorial https://youtu.be/M25eJ0s6X
 - Pages like featured, most viewed, top rated, and most recent loads slow, but we are just experimenting things to make the best search results
 - commenting, adding videos to playlists, and translating channel IDs to names dont work for now
 - There is no real video description because you can't directly get the description from Invidious. Even if I did add, it makes it slow to load videos on the front page because they are separate. But it's not crazy slow (takes 20 seconds to load), but if people really want it, I guess I can add it.
-- the channel names are all just channel IDs (just like Lincoln's tuberepair) because of an XML change that's required for channel uplaods to work
-  - To compromise for it, it'll be added in the description (ex. Author name - Title of video)
 - vids will take time to load, depending on video length, since it has to download and convert before playing which takes time, and the built-in yt unfortunately doesn't support direct streaming
 - most viewed won't work because of invidious bug. Wait until that gets fixed ig
 - The video load time will depend on your CPU and internet speed. Avoid playing 24 hour or 100 hour videos because that will take very very very long to load and may take up storage. 
