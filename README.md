@@ -43,7 +43,7 @@ Still confused on how to set it up? Here's a tutorial https://youtu.be/M25eJ0s6X
 - faster loading times
 
 # Login feature
-Big shoutout to [iOS 4 Xclusive](https://github.com/newfuckingplayer) for integrating the login system with the login from [Linocln's tuberepair server](https://github.com/erievs/Lincoln/)
+Big shoutout to [memeguyonyt](https://github.com/newfuckingplayer) for integrating the login system with the login from [Linocln's tuberepair server](https://github.com/erievs/Lincoln/)
 
 ### Logging in to youtube
 _You must get your own GOOGLE CLIENT ID and GOOGLE CLIENT SECRET_
